@@ -326,12 +326,18 @@ function renderData() {
     <p class="privacy">記録はこの端末内に保存され、このアプリによってサーバーへ送信されません。端末、ブラウザ、Webサイトデータの削除等により失われることがあります。定期的にバックアップしてください。</p>
     <p><span class="storage-status">端末への保存: ${esc(storageLabel())}</span></p>
     <p class="privacy">${esc(storageHelp())}</p>
+    ${state.storageStatus === 'persistent' ? '' : '<div class="button-row"><button class="secondary" type="button" data-action="request-persist">記録を消えにくくする</button></div>'}
+    <hr><h3>記録をバックアップする</h3>
     <p>最後にバックアップした日時: ${state.lastBackupAt ? esc(displayDate(state.lastBackupAt)) : 'まだバックアップしていません'}</p>
-    <div class="button-row">${state.storageStatus === 'persistent' ? '' : '<button class="secondary" type="button" data-action="request-persist">記録を消えにくくする</button>'}
-      <button class="secondary" type="button" data-action="export-backup">記録をバックアップ</button>
-      <button class="secondary" type="button" data-action="export-summary">記録の一覧表を保存（CSV）</button>
-      <button class="secondary" type="button" data-action="export-series">詳しい経過を保存（CSV）</button></div>
-    <hr><h3>バックアップから記録を戻す</h3><label class="field"><span>保存してあるバックアップファイル</span><input type="file" accept="application/json,.json" data-action="import-file"></label>
+    <p class="privacy">別の端末へ記録を移すときや、端末を買い替えるときは、このファイルを保存してください。下の「バックアップから記録を戻す」で読み込めます。</p>
+    <div class="button-row"><button class="primary small" type="button" data-action="export-backup">記録をバックアップ</button></div>
+    <details class="extra"><summary>CSVで書き出す（表計算ソフト用）</summary>
+      <p class="privacy">バックアップとは別の形式です。ExcelやNumbersで見るためのもので、このファイルから記録を戻すことはできません。</p>
+      <div class="button-row"><button class="secondary" type="button" data-action="export-summary">記録の一覧表（CSV）</button>
+        <button class="secondary" type="button" data-action="export-series">詳しい経過（CSV）</button></div></details>
+    <hr><h3>バックアップから記録を戻す</h3>
+    <p class="privacy">読み込むと、<strong>この端末にある記録と設定はすべて置き換わります</strong>。この端末にも残しておきたい記録がある場合は、先に上のバックアップを保存してください。</p>
+    <label class="field"><span>保存してあるバックアップファイル</span><input type="file" accept="application/json,.json" data-action="import-file"></label>
     ${preview ? `<div class="notice"><strong>復元前の確認</strong><br>件数: ${preview.sessions.length}<br>期間: ${esc(importPeriod(preview.sessions))}<br>schemaVersion: ${preview.schemaVersion}<br>現在の全データを置換します。</div>
       <button class="secondary" type="button" data-action="confirm-import">確認して全置換</button>` : ''}
     <hr><h3>すべての記録を削除</h3><form data-form="delete-all"><label class="check"><input type="checkbox" name="confirm" required><span>${state.sessions.length}件を削除し、バックアップがなければ復元できないことを確認しました</span></label>
@@ -682,20 +688,44 @@ async function saveSessionInfo(form) {
   toast('セッション情報を保存しました。');
 }
 
+// iOS / iPadOS ではダウンロードの導線が分かりにくいため共有シートを第一手段とする。
+// デスクトップの Chrome 等も canShare({files}) が true を返すことがあるが、そこで
+// 共有APIを使うと何も起きずに終わるため、プラットフォーム判定と併用する（§17.1）。
+function isAppleTouchDevice() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function downloadFile(file, name) {
+  const url = URL.createObjectURL(file);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
 async function exportFile(name, content, type) {
   const file = new File([content], name, { type });
-  try {
-    if (navigator.canShare?.({ files: [file] })) {
+  if (isAppleTouchDevice() && navigator.canShare?.({ files: [file] })) {
+    try {
       await navigator.share({ files: [file], title: name });
-    } else {
-      const url = URL.createObjectURL(file);
-      const link = document.createElement('a');
-      link.href = url; link.download = name; link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
+    } catch (error) {
+      if (error.name === 'AbortError') return false;
+      console.warn('Web Share failed, falling back to download', error);
     }
+  }
+  try {
+    downloadFile(file, name);
+    toast(`${name} を書き出しました。保存先を確認してください。`);
     return true;
   } catch (error) {
-    if (error.name !== 'AbortError') toast('ファイルを保存できませんでした。もう一度お試しください。');
+    console.error(error);
+    toast('ファイルを保存できませんでした。もう一度お試しいただくか、別のブラウザでお試しください。');
     return false;
   }
 }

@@ -1,0 +1,17 @@
+# 依存関係
+node_modules/
+
+# 検証スクリプトが出力するスクリーンショット（icons/ の画像は対象外）
+/*.png
+
+# ローカルのツール設定
+.claude/
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+*.log
+
+# 内部の設計ドキュメント（公開しない）
+SLIT Symptom Tracker v*.md
+SLIT_v*.md

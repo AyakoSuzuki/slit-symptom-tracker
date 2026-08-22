@@ -1,0 +1,801 @@
+import {
+  DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
+  createSession, dashboardSummary, deleteSymptomRecord, deriveMetrics, formatJapaneseMinutes,
+  localIso, minutesBetween, reopenSession, shouldAutoClose, updateSymptomRecord, validateSettings
+} from './model.js';
+import {
+  deleteAllData, deleteSession, getMeta, getSessions, getSettings, putMeta, putSession,
+  putSettings, replaceAllData
+} from './db.js';
+import { backupJson, summaryCsv, timeSeriesCsv, validateBackup } from './export.js';
+import { comparisonChart, lineChart } from './charts.js';
+
+const app = document.querySelector('#app');
+const toastRegion = document.querySelector('#toast-region');
+const state = {
+  mode: 'child',
+  parentTab: 'dashboard',
+  period: 14,
+  settings: { ...DEFAULT_SETTINGS },
+  sessions: [],
+  pendingWorry: undefined,
+  worrySkipped: false,
+  undo: null,
+  undoTimer: null,
+  saveError: false,
+  retryAction: null,
+  formDirty: false,
+  storageStatus: 'checking',
+  lastBackupAt: null,
+  importPreview: null,
+  updateWaiting: false
+};
+
+const outcomeLabels = {
+  resolved: 'おさまった記録あり',
+  unresolved: 'おさまった記録なし',
+  noSymptomReported: '症状なし',
+  noSymptomData: '記録なし'
+};
+
+const severityLabels = ['きにならない', 'ほんのすこし', 'すこし', 'まあまあ', 'けっこう', 'とても'];
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+  })[character]);
+}
+
+function displayDate(timestamp) {
+  if (!timestamp) return '—';
+  return new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(timestamp));
+}
+
+function displayTime(timestamp) {
+  if (!timestamp) return '';
+  return timestamp.slice(11, 16);
+}
+
+function inputDateTime(timestamp) {
+  return timestamp ? timestamp.slice(0, 16) : '';
+}
+
+function percent(value) {
+  return value === undefined ? '—' : `${Math.round(value * 100)}%`;
+}
+
+function numberOrDash(value, suffix = '') {
+  return value === undefined ? '—' : `${Number.isInteger(value) ? value : value.toFixed(1)}${suffix}`;
+}
+
+function severityIcon(level) {
+  const positions = [10, 18, 26, 34, 42];
+  const dots = positions.map((x, index) => `<circle cx="${x}" cy="19" r="3.3"
+    fill="${index < level ? '#2d6658' : '#ffffff'}" stroke="#2d6658" stroke-width="1.8"/>`).join('');
+  return `<svg viewBox="0 0 52 38" aria-hidden="true"><rect x="2" y="2" width="48" height="34" rx="17" fill="#eef7f3" stroke="#6b9287" stroke-width="2"/>${dots}</svg>`;
+}
+
+function cloudShape(cx, cy, filled) {
+  const puffs = [[-1.4, 0.5, 1.4], [0.2, -0.7, 1.8], [1.7, 0.7, 1.1]];
+  const silhouette = puffs.map(([dx, dy, r]) =>
+    `<circle cx="${cx + dx}" cy="${cy + dy}" r="${r + 1.0}" fill="#526b88"/>`).join('');
+  const body = puffs.map(([dx, dy, r]) =>
+    `<circle cx="${cx + dx}" cy="${cy + dy}" r="${r}" fill="#ffffff"/>`).join('');
+  return silhouette + (filled ? '' : body);
+}
+
+function worryIcon(level) {
+  const positions = [9, 17.5, 26, 34.5, 43];
+  const clouds = positions.map((x, index) => cloudShape(x, 19, index < level)).join('');
+  return `<svg viewBox="0 0 52 38" aria-hidden="true"><rect x="2" y="2" width="48" height="34" rx="17" fill="#eef1fa" stroke="#7c8db0" stroke-width="2"/>${clouds}</svg>`;
+}
+
+function scalePicker({ action, ariaKind, icon, selected }) {
+  return `<div class="scale-grid" role="radiogroup" aria-label="${ariaKind}">${severityLabels.map((label, level) => `
+    <button class="scale-button" type="button" role="radio" aria-checked="${selected === level}"
+      tabindex="${(selected ?? 0) === level ? 0 : -1}"
+      aria-label="${ariaKind} ${level} ${label}" data-action="${action}" data-value="${level}">
+      ${icon(level)}<span class="scale-number">${level}</span><span class="scale-label">${label}</span>
+    </button>`).join('')}</div>`;
+}
+
+function severityPicker(selected) {
+  return scalePicker({ action: 'record-severity', ariaKind: '症状の強さ', icon: severityIcon, selected });
+}
+
+function worryPicker() {
+  return scalePicker({ action: 'select-worry', ariaKind: '心配の強さ', icon: worryIcon, selected: state.pendingWorry });
+}
+
+function childHeader() {
+  return `<header class="topbar"><h1 class="brand">🌿 きょうの きろく</h1>
+    <button class="adult-link" type="button" data-action="adult-gate">おとな</button></header>`;
+}
+
+function saveErrorCard() {
+  if (!state.saveError) return '';
+  return `<section class="card error-card" role="alert"><p class="child-title">きろく できなかったみたい</p>
+    <div class="button-row"><button class="secondary" type="button" data-action="retry-save">もういちど</button>
+    <button class="secondary" type="button" data-action="adult-gate">おとなを よぶ</button></div></section>`;
+}
+
+function renderChild() {
+  if (!state.settings.setupComplete || !validateSettings(state.settings)) {
+    return `<div class="shell child-shell">${childHeader()}<section class="card mint">
+      <p class="eyebrow">はじめの せってい</p><h2 class="child-title">おとなと いっしょに<br>せっていしてね</h2>
+      <button class="primary" type="button" data-action="adult-gate">おとなの がめんへ</button>
+    </section>${saveErrorCard()}</div>`;
+  }
+
+  if (!state.settings.childModeEnabled) {
+    return `<div class="shell child-shell">${childHeader()}<section class="card mint">
+      <h2 class="child-title">おとなの がめんを<br>つかってね</h2>
+      <button class="primary" type="button" data-action="adult-gate">おとなの がめんへ</button>
+    </section></div>`;
+  }
+
+  const openSession = state.sessions.find((session) => session.lifecycle === 'open');
+  const todaySessions = state.sessions.filter((session) => session.localDate === localDateToday());
+  if (openSession) return renderActiveChild(openSession);
+  if (todaySessions.length) return renderClosedToday(todaySessions[0]);
+  return `<div class="shell child-shell">${childHeader()}<section class="card mint">
+    <p class="eyebrow">きょうのおくすり</p>
+    <h2 class="child-title">${esc(state.settings.medicationName)}</h2>
+    ${state.settings.askPreDoseWorry ? `<p class="question">いま どのくらい しんぱい？</p>${worryPicker()}
+      <button class="quiet-button" type="button" data-action="skip-worry">${state.worrySkipped ? 'とばしたよ' : 'とばす'}</button><hr>` : ''}
+    <button class="primary" type="button" data-action="start-dose">おくすり のんだよ</button>
+  </section>${saveErrorCard()}${renderUndo()}</div>`;
+}
+
+function renderActiveChild(session) {
+  const metrics = deriveMetrics(session);
+  let result = '';
+  if (metrics.outcome === 'resolved') {
+    result = `<div class="result-card" role="status"><strong>いまは きにならないよ</strong>${state.settings.showResolutionDurationInChildMode
+      ? `<br>${formatJapaneseMinutes(Math.max(1, metrics.lastEpisodeDuration))}くらいで きにならなくなったよ` : ''}</div>
+      <button class="quiet-button" type="button" data-action="focus-severity">また きになった</button>`;
+  } else if (metrics.outcome === 'noSymptomReported') {
+    result = '<div class="result-card" role="status"><strong>きにならない きろくが あるよ</strong></div>';
+  } else if (metrics.outcome === 'unresolved') {
+    result = `<div class="result-card" role="status"><strong>さいごの きろくは ${metrics.lastRecordedSeverity} ${severityLabels[metrics.lastRecordedSeverity]}</strong></div>`;
+  }
+  return `<div class="shell child-shell">${childHeader()}<section class="card lavender">
+    <p class="eyebrow">おくすり のんだよ</p><p class="dose-time">${esc(displayTime(session.doseTimestamp))}</p>
+    <p class="helper">${esc(session.medication.name)}</p>${result}
+  </section><section class="card mint" id="severity-card">
+    <p class="question">いま ${esc(session.symptom.childLabel)}は<br>どんなかんじ？</p>
+    ${severityPicker(metrics.lastRecordedSeverity)}
+    <p class="helper">かわったときだけ おしてね</p>
+  </section>${saveErrorCard()}${renderUndo()}</div>`;
+}
+
+function renderClosedToday(session) {
+  const metrics = deriveMetrics(session);
+  const text = metrics.outcome === 'noSymptomData'
+    ? 'しょうじょうの きろくは ないよ'
+    : metrics.outcome === 'noSymptomReported'
+      ? 'きにならない きろくが あるよ'
+      : metrics.outcome === 'resolved' ? 'いまは きにならないよ' : 'おとなと きろくを みてね';
+  return `<div class="shell child-shell">${childHeader()}<section class="card sky">
+    <p class="eyebrow">きょうの きろく</p><h2 class="child-title">${text}</h2>
+    <p class="helper">${esc(displayTime(session.doseTimestamp))}</p>
+  </section>${saveErrorCard()}${renderUndo()}</div>`;
+}
+
+function renderUndo() {
+  return state.undo ? `<div class="undo-bar" role="status"><span>きろくしたよ</span>
+    <button type="button" data-action="undo">まちがえた</button></div>` : '';
+}
+
+function renderParentGate() {
+  return `<div class="shell parent-gate"><section class="card">
+    <h1>保護者画面</h1><p>履歴、設定、データ管理、安全情報を表示します。</p>
+    <form data-form="parent-gate"><label class="check"><input type="checkbox" name="confirm" required>
+      <span>保護者として詳細画面を開きます</span></label>
+      ${state.settings.parentPinHash ? '<label class="field"><span>PIN</span><input name="pin" type="password" inputmode="numeric" autocomplete="off" required></label>' : ''}
+      <div class="button-row"><button class="primary small" type="submit">開く</button>
+      <button class="secondary" type="button" data-action="back-child">戻る</button></div>
+    </form></section></div>`;
+}
+
+function renderParent() {
+  const tabs = [
+    ['dashboard', '概要'], ['history', '履歴'], ['settings', '設定'], ['data', 'データ'], ['safety', '安全について']
+  ];
+  return `<div class="shell parent-shell"><header class="topbar"><div><p class="eyebrow">Parent Mode</p>
+    <h1 class="brand">SLIT Symptom Tracker</h1></div><button class="secondary" type="button" data-action="back-child">こども画面へ</button></header>
+    <nav class="tabs" aria-label="保護者画面">${tabs.map(([id, label]) => `<button class="tab" type="button" role="tab"
+      aria-selected="${state.parentTab === id}" data-action="parent-tab" data-tab="${id}">${label}</button>`).join('')}</nav>
+    ${parentPanel()}</div>`;
+}
+
+function parentPanel() {
+  if (state.parentTab === 'history') return renderHistory();
+  if (state.parentTab === 'settings') return renderSettings();
+  if (state.parentTab === 'data') return renderData();
+  if (state.parentTab === 'safety') return renderSafety();
+  return renderDashboard();
+}
+
+function filteredSessions() {
+  return state.period === 0 ? state.sessions : state.sessions.slice(0, state.period);
+}
+
+function renderDashboard() {
+  const sessions = filteredSessions();
+  const summary = dashboardSummary(sessions);
+  const backupAge = state.lastBackupAt ? (Date.now() - new Date(state.lastBackupAt)) / 86400000 : Infinity;
+  return `<section aria-labelledby="dashboard-title"><div class="card">
+    <div class="topbar"><h2 id="dashboard-title" class="panel-title">記録の概要</h2>
+      <label class="field"><span class="visually-hidden">対象期間</span><select id="period-select" data-action="period">
+        ${[[7,'直近7回'],[14,'直近14回'],[30,'直近30回'],[0,'全期間']].map(([value,label]) => `<option value="${value}" ${state.period===value?'selected':''}>${label}</option>`).join('')}
+      </select></label></div>
+    ${backupAge >= 30 ? '<p class="notice">バックアップがまだないか、最後のバックアップから30日以上経過しています。データ画面から記録をバックアップできます。</p>' : ''}
+    <div class="stats">
+      ${stat('服用回数', summary.count)}${stat('症状なし', percent(summary.noSymptomRate))}
+      ${stat('症状記録あり', percent(summary.symptomaticRate))}${stat('記録なし', percent(summary.noDataRate))}
+      ${stat('最大強度の中央値', numberOrDash(summary.medianMaximumSeverity))}${stat('持続時間の中央値', numberOrDash(summary.medianDuration, '分'))}
+      ${stat('最初の記録までの中央値', numberOrDash(summary.medianFirstLatency, '分'))}${stat('おさまった記録なし', summary.unresolvedCount)}
+    </div><p class="privacy">記録操作の時刻に基づく観察データです。実際の発症・消失時刻や医学的な緊急度を示すものではありません。</p>
+    <div class="chart-grid"><article class="chart-card"><h3>症状時間の推移</h3><div id="duration-chart"></div></article>
+      <article class="chart-card"><h3>最大強度の推移</h3><div id="maximum-chart"></div></article>
+      <article class="chart-card"><h3>心配度と最大強度</h3><div id="worry-chart"></div><p id="worry-missing" class="privacy"></p></article></div>
+  </div></section>`;
+}
+
+function stat(label, value) {
+  return `<div class="stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
+}
+
+function renderHistory() {
+  const open = state.sessions.find((session) => session.lifecycle === 'open');
+  const todayCount = state.sessions.filter((session) => session.localDate === localDateToday()).length;
+  return `<section><div class="card"><div class="topbar"><h2 class="panel-title">履歴</h2>
+    <button class="primary small" type="button" data-action="parent-start-dose" ${open ? 'disabled' : ''}>${todayCount ? '同日の新しい服用記録' : '新しい服用記録'}</button></div>
+    ${open ? '<p class="notice">記録受付中のセッションがあります。新しい服用記録を作るには、先にそのセッションを閉じてください。</p>' : ''}
+    ${state.sessions.length ? state.sessions.map(historyItem).join('') : '<p>まだ記録がありません。</p>'}</div></section>`;
+}
+
+function historyItem(session) {
+  const metrics = deriveMetrics(session);
+  const open = session.lifecycle === 'open';
+  return `<details class="history-item"><summary>${esc(session.localDate)} ${esc(displayTime(session.doseTimestamp))}
+    ${open ? '<span class="badge open">記録受付中</span>' : ''}<span class="badge">${esc(outcomeLabels[metrics.outcome])}</span></summary>
+    <div class="history-body">
+      <dl class="state-pair">
+        <div><dt>記録の受付</dt><dd>${open ? '受付中' : '終了'}</dd></div>
+        <div><dt>症状の結果</dt><dd>${esc(outcomeLabels[metrics.outcome])}</dd></div>
+      </dl>
+      <p><strong>${esc(session.medication.name)} ${esc(session.medication.dose)}</strong><br>
+      最初の症状記録: ${esc(displayDate(metrics.firstRecordedSymptomAt))}<br>最大強度: ${numberOrDash(metrics.maximumSeverity)} / episode: ${metrics.episodeCount}<br>
+      症状時間合計: ${metrics.outcome === 'unresolved' ? 'おさまった記録がないため空欄' : numberOrDash(metrics.totalSymptomaticTime, '分')}</p>
+      <div id="session-chart-${esc(session.id)}" class="chart-card"></div><hr>
+      <div class="button-row">${open
+        ? `<button class="secondary" type="button" data-action="close-session" data-id="${esc(session.id)}">セッションを閉じる</button>`
+        : `<button class="secondary" type="button" data-action="reopen-session" data-id="${esc(session.id)}">セッションを再開</button>`}
+        ${metrics.outcome === 'noSymptomData' ? `<button class="secondary" type="button" data-action="confirm-no-symptom" data-id="${esc(session.id)}">症状なしを確認</button>` : ''}
+        <button class="secondary danger" type="button" data-action="delete-session" data-id="${esc(session.id)}">セッションを削除</button></div>
+      <h3>症状記録</h3>${session.symptomRecords.length ? session.symptomRecords.map((record) => recordEditor(session, record)).join('') : '<p>記録なし</p>'}
+      ${session.lifecycle === 'open' ? `<form class="record-row" data-form="record-add" data-session-id="${esc(session.id)}">
+        <label class="field"><span>記録時刻（空欄なら現在時刻）</span><input type="datetime-local" name="timestamp"></label>
+        <label class="field"><span>強度</span><select name="severity">${[0,1,2,3,4,5].map((value) => `<option>${value}</option>`).join('')}</select></label>
+        <div class="record-actions"><button class="secondary" type="submit">記録を追加</button></div></form>` : ''}
+      <form data-form="session-edit" data-id="${esc(session.id)}"><div class="form-grid">
+        <label class="field full"><span>メモ</span><textarea name="notes">${esc(session.notes)}</textarea></label>
+        <fieldset class="field full"><legend>体調</legend><div class="button-row">${conditionChecks(session)}</div></fieldset>
+        <label class="field full"><span>その他の体調</span><input name="conditionOtherText" value="${esc(session.conditionOtherText)}"></label>
+      </div><button class="secondary" type="submit">セッション情報を保存</button></form>
+    </div></details>`;
+}
+
+function recordEditor(session, record) {
+  return `<form class="record-row" data-form="record-edit" data-session-id="${esc(session.id)}" data-record-id="${esc(record.id)}">
+    <label class="field"><span>記録時刻</span><input type="datetime-local" name="timestamp" value="${esc(inputDateTime(record.timestamp))}" required></label>
+    <label class="field"><span>強度</span><select name="severity">${[0,1,2,3,4,5].map((value) => `<option ${record.severity===value?'selected':''}>${value}</option>`).join('')}</select></label>
+    <div class="record-actions button-row"><button class="secondary" type="submit">保存</button><button class="secondary danger" type="button" data-action="delete-record" data-session-id="${esc(session.id)}" data-record-id="${esc(record.id)}">削除</button></div>
+  </form>`;
+}
+
+function conditionChecks(session) {
+  const labels = { normal: '普通', cold: '風邪', cough: '咳', fever: '発熱', other: 'その他' };
+  return Object.entries(labels).map(([value, label]) => `<label class="check"><input type="checkbox" name="conditions" value="${value}"
+    ${(session.conditionCodes || []).includes(value) ? 'checked' : ''}><span>${label}</span></label>`).join('');
+}
+
+function renderSettings() {
+  const s = state.settings;
+  return `<section class="card"><h2 class="panel-title">${s.setupComplete ? '設定' : '初回セットアップ'}</h2>
+    <form data-form="settings"><div class="form-grid">
+      <label class="field"><span>薬剤名</span><input name="medicationName" value="${esc(s.medicationName)}" required></label>
+      <label class="field"><span>用量・強度</span><input name="medicationDose" value="${esc(s.medicationDose)}" required></label>
+      <label class="field full"><span>記録する症状（ひらがな）</span><input name="symptomLabel" value="${esc(s.childSymptomLabel || s.parentSymptomLabel)}" required>
+        <small class="helper">子ども画面の「いま ○○は どんなかんじ？」の○○に入る、短いことばを入力してください。保護者画面にも同じ名前を表示します。</small></label>
+      <label class="field"><span>新しいPIN（数字4〜8桁、空欄なら変更なし）</span><input name="parentPin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" autocomplete="new-password"></label>
+      <label class="field"><span>緊急連絡先のラベル（任意）</span><input name="emergencyContactLabel" value="${esc(s.emergencyContactLabel)}"></label>
+      <label class="field"><span>緊急連絡先の値（任意）</span><input name="emergencyContactValue" value="${esc(s.emergencyContactValue)}"></label>
+      <label class="check field full"><input type="checkbox" name="childModeEnabled" ${s.childModeEnabled?'checked':''}><span>子ども画面を使用する</span></label>
+      <label class="check field full"><input type="checkbox" name="askPreDoseWorry" ${s.askPreDoseWorry?'checked':''}><span>服用前の心配度を任意で尋ねる</span></label>
+      <label class="check field full"><input type="checkbox" name="showResolutionDurationInChildMode" ${s.showResolutionDurationInChildMode?'checked':''}><span>Child Modeの終了時に所要時間を表示する（既定OFF）</span></label>
+    </div><p class="privacy">設定変更後も、過去セッションに保存された薬剤名・用量・症状表示名は変わりません。</p>
+    <button class="primary small" type="submit">設定を保存</button></form></section>`;
+}
+
+function renderData() {
+  const preview = state.importPreview;
+  return `<section><div class="card"><h2 class="panel-title">データ管理</h2>
+    <p class="privacy">記録はこの端末内に保存され、このアプリによってサーバーへ送信されません。端末、ブラウザ、Webサイトデータの削除等により失われることがあります。定期的にバックアップしてください。</p>
+    <p><span class="storage-status">端末への保存: ${esc(storageLabel())}</span></p>
+    <p class="privacy">${esc(storageHelp())}</p>
+    <p>最後にバックアップした日時: ${state.lastBackupAt ? esc(displayDate(state.lastBackupAt)) : 'まだバックアップしていません'}</p>
+    <div class="button-row">${state.storageStatus === 'persistent' ? '' : '<button class="secondary" type="button" data-action="request-persist">記録を消えにくくする</button>'}
+      <button class="secondary" type="button" data-action="export-backup">記録をバックアップ</button>
+      <button class="secondary" type="button" data-action="export-summary">記録の一覧表を保存（CSV）</button>
+      <button class="secondary" type="button" data-action="export-series">詳しい経過を保存（CSV）</button></div>
+    <hr><h3>バックアップから記録を戻す</h3><label class="field"><span>保存してあるバックアップファイル</span><input type="file" accept="application/json,.json" data-action="import-file"></label>
+    ${preview ? `<div class="notice"><strong>復元前の確認</strong><br>件数: ${preview.sessions.length}<br>期間: ${esc(importPeriod(preview.sessions))}<br>schemaVersion: ${preview.schemaVersion}<br>現在の全データを置換します。</div>
+      <button class="secondary" type="button" data-action="confirm-import">確認して全置換</button>` : ''}
+    <hr><h3>すべての記録を削除</h3><form data-form="delete-all"><label class="check"><input type="checkbox" name="confirm" required><span>${state.sessions.length}件を削除し、バックアップがなければ復元できないことを確認しました</span></label>
+      <label class="field"><span>確認のため「すべて削除」と入力</span><input name="phrase" required></label>
+      <button class="secondary danger" type="submit">すべて削除</button></form>
+  </div></section>`;
+}
+
+function storageLabel() {
+  return ({
+    checking: '確認中です',
+    persistent: '保護を強化しています',
+    bestEffort: '通常どおり保存しています',
+    unavailable: '保存の保護状態を確認できません',
+    denied: '通常どおり保存しています'
+  })[state.storageStatus] || '確認できません';
+}
+
+function storageHelp() {
+  return ({
+    checking: '端末内の保存状態を確認しています。',
+    persistent: 'この端末では、ブラウザによる記録の自動削除が起こりにくい保存方法を使用しています。それでも定期的なバックアップをおすすめします。',
+    bestEffort: '記録はこの端末内に保存されています。ただし、端末の空き容量不足やブラウザデータの削除で失われる可能性があります。',
+    unavailable: '記録はこの端末内に保存されますが、このブラウザでは保存を消えにくくできるか確認できません。',
+    denied: '保存方法は変更されませんでした。記録は端末内に保存されますので、定期的にバックアップしてください。'
+  })[state.storageStatus] || '記録はこの端末内に保存されます。';
+}
+
+function renderSafety() {
+  return `<section class="card"><h2 class="panel-title">安全について</h2>
+    <p class="notice"><strong>このアプリは診断や緊急度判定を行いません。</strong> 症状の強さ0〜5は主観的な量であり、医学的な緊急度とは別です。</p>
+    <p>呼吸が苦しい、声が急に変わった、喉が締まる感じ、舌や喉の急な腫れ、強い咳や喘鳴が続く、ぐったりしている等がある場合は、アプリで経過記録を続けず、処方医から指示された緊急時対応に従ってください。</p>
+    ${state.settings.emergencyContactValue ? `<p><strong>${esc(state.settings.emergencyContactLabel || '設定された連絡先')}</strong><br>${esc(state.settings.emergencyContactValue)}<br><small>利用者が入力した値です。アプリが検証した公的番号ではありません。</small></p>` : '<p>緊急連絡先は設定されていません。</p>'}
+  </section>`;
+}
+
+function localDateToday() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+}
+
+function importPeriod(sessions) {
+  if (!sessions.length) return '記録なし';
+  const dates = sessions.map((session) => session.localDate).sort();
+  return `${dates[0]}〜${dates.at(-1)}`;
+}
+
+async function hashPin(pin) {
+  const data = new TextEncoder().encode(pin);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function saveWithFeedback(action, child = false, retry = null) {
+  try {
+    await action();
+    state.saveError = false;
+    state.retryAction = null;
+    return true;
+  } catch (error) {
+    console.error(error);
+    state.saveError = child;
+    state.retryAction = retry || action;
+    if (!child) toast('保存できませんでした。もう一度お試しください。');
+    render();
+    return false;
+  }
+}
+
+async function refreshSessions() {
+  const loaded = await getSessions();
+  const closed = autoCloseSessions(loaded);
+  const changed = closed.filter((session, index) => session !== loaded[index]);
+  for (const session of changed) await putSession(session);
+  state.sessions = closed;
+}
+
+function setUndo(undo) {
+  clearTimeout(state.undoTimer);
+  state.undo = undo;
+  state.undoTimer = setTimeout(() => {
+    state.undo = null;
+    render();
+  }, 30000);
+}
+
+function toast(message) {
+  toastRegion.innerHTML = `<div class="toast">${esc(message)}</div>`;
+  setTimeout(() => { toastRegion.replaceChildren(); }, 3500);
+}
+
+function render() {
+  state.formDirty = false;
+  app.innerHTML = state.mode === 'child' ? renderChild() : state.mode === 'gate' ? renderParentGate() : renderParent();
+  if (state.mode === 'parent') mountCharts();
+}
+
+function mountCharts() {
+  if (state.parentTab === 'dashboard') {
+    const sessions = [...filteredSessions()].reverse();
+    const dated = sessions.map((session, index) => ({ session, metrics: deriveMetrics(session), index }));
+    lineChart(document.querySelector('#duration-chart'), dated.filter((item) => item.metrics.outcome === 'resolved').map((item) => ({
+      x: item.index, y: item.metrics.totalSymptomaticTime, label: item.session.localDate.slice(5)
+    })), { ariaLabel: '解決済みセッションの症状時間合計の推移', emptyText: '解決済みの記録がありません。' });
+    lineChart(document.querySelector('#maximum-chart'), dated.filter((item) => item.metrics.maximumSeverity !== undefined).map((item) => ({
+      x: item.index, y: item.metrics.maximumSeverity, label: item.session.localDate.slice(5)
+    })), { yMax: 5, ariaLabel: '最大症状強度の推移' });
+    const worry = dated.filter((item) => item.session.preDoseWorry !== undefined && item.metrics.maximumSeverity !== undefined);
+    comparisonChart(document.querySelector('#worry-chart'), [
+      { name: '心配度', color: '#526b88', dash: '6 4', marker: 'square',
+        points: worry.map((item, index) => ({ x: index, y: item.session.preDoseWorry, label: `${item.session.localDate.slice(5)} 心配度` })) },
+      { name: '最大強度', color: '#2d6658', marker: 'circle',
+        points: worry.map((item, index) => ({ x: index, y: item.metrics.maximumSeverity, label: `${item.session.localDate.slice(5)} 最大強度` })) }
+    ], { yMax: 5, ariaLabel: '記録された心配度と最大症状強度の比較', emptyText: `比較できる記録がありません。欠測 ${sessions.length - worry.length}件` });
+    const missing = document.querySelector('#worry-missing');
+    if (missing) missing.textContent = `欠測 ${sessions.length - worry.length}件。因果関係や評価を示すグラフではありません。`;
+  }
+  if (state.parentTab === 'history') {
+    state.sessions.forEach((session) => {
+      const records = [...session.symptomRecords].sort((a,b) => new Date(a.timestamp)-new Date(b.timestamp));
+      lineChart(document.querySelector(`#session-chart-${CSS.escape(session.id)}`), records.map((record) => ({
+        x: minutesBetween(record.timestamp, session.doseTimestamp), y: record.severity,
+        label: `${minutesBetween(record.timestamp, session.doseTimestamp)}分`
+      })), { yMax: 5, ariaLabel: `${session.localDate}の個別症状記録`, emptyText: '症状記録がありません。' });
+    });
+  }
+}
+
+app.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-action]');
+  if (!button) return;
+  const action = button.dataset.action;
+  if (action === 'adult-gate') { state.mode = 'gate'; render(); return; }
+  if (action === 'back-child') { state.mode = 'child'; render(); return; }
+  if (action === 'parent-tab') { state.parentTab = button.dataset.tab; render(); return; }
+  if (action === 'select-worry') { state.pendingWorry = Number(button.dataset.value); state.worrySkipped = false; render(); return; }
+  if (action === 'skip-worry') { state.pendingWorry = undefined; state.worrySkipped = true; render(); return; }
+  if (action === 'focus-severity') { document.querySelector('#severity-card')?.scrollIntoView({ behavior: 'smooth' }); return; }
+  if (action === 'start-dose') { await startDose(true); return; }
+  if (action === 'parent-start-dose') { await startDose(false); return; }
+  if (action === 'record-severity') { await recordSeverity(Number(button.dataset.value)); return; }
+  if (action === 'undo') { await undoLast(); return; }
+  if (action === 'retry-save') { await retrySave(); return; }
+  if (action === 'close-session') { await mutateSession(button.dataset.id, (session) => closeSession(session)); return; }
+  if (action === 'reopen-session') { await reopenSelected(button.dataset.id); return; }
+  if (action === 'confirm-no-symptom') { await mutateSession(button.dataset.id, (session) => confirmNoSymptoms(session)); return; }
+  if (action === 'delete-session') { await removeSession(button.dataset.id); return; }
+  if (action === 'delete-record') { await removeRecord(button.dataset.sessionId, button.dataset.recordId); return; }
+  if (action === 'export-summary') { await exportFile('slit-summary.csv', summaryCsv(state.sessions), 'text/csv;charset=utf-8'); return; }
+  if (action === 'export-series') { await exportFile('slit-time-series.csv', timeSeriesCsv(state.sessions), 'text/csv;charset=utf-8'); return; }
+  if (action === 'export-backup') { await exportBackup(); return; }
+  if (action === 'confirm-import') { await importConfirmed(); return; }
+  if (action === 'request-persist') { await requestPersistence(); return; }
+});
+
+app.addEventListener('change', async (event) => {
+  const target = event.target;
+  if (target.dataset.action === 'period') { state.period = Number(target.value); render(); return; }
+  if (target.dataset.action === 'import-file') await readImportFile(target.files?.[0]);
+});
+
+app.addEventListener('input', (event) => {
+  if (state.mode === 'parent' && event.target.closest('form[data-form]')) state.formDirty = true;
+});
+
+app.addEventListener('keydown', (event) => {
+  // 矢印キーはフォーカス移動のみとする。radio の慣例どおり選択まで行うと、
+  // 症状ピッカーでは移動のたびに記録が保存されてしまうため、決定は Enter / Space に限定する。
+  const offsets = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+  const offset = offsets[event.key];
+  if (!offset) return;
+  const radio = event.target.closest('[role="radio"]');
+  const group = radio?.closest('[role="radiogroup"]');
+  if (!group) return;
+  const radios = [...group.querySelectorAll('[role="radio"]')];
+  const next = radios[(radios.indexOf(radio) + offset + radios.length) % radios.length];
+  radios.forEach((item) => item.setAttribute('tabindex', item === next ? '0' : '-1'));
+  next.focus();
+  event.preventDefault();
+});
+
+app.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const kind = form.dataset.form;
+  if (kind === 'parent-gate') await enterParent(form);
+  if (kind === 'settings') await saveSettings(form);
+  if (kind === 'record-add') await addRecordFromParent(form);
+  if (kind === 'record-edit') await saveRecord(form);
+  if (kind === 'session-edit') await saveSessionInfo(form);
+  if (kind === 'delete-all') await removeAll(form);
+});
+
+async function startDose(child) {
+  if (state.sessions.some((session) => session.lifecycle === 'open')) return;
+  const worry = child ? state.pendingWorry : undefined;
+  const worrySkipped = state.worrySkipped;
+  const session = createSession(state.settings, worry);
+  const success = await saveWithFeedback(() => putSession(session), child, () => startDose(child));
+  if (!success) return;
+  state.sessions = [session, ...state.sessions];
+  state.pendingWorry = undefined;
+  state.worrySkipped = false;
+  setUndo({ kind: 'dose', sessionId: session.id, worry, worrySkipped });
+  render();
+}
+
+async function recordSeverity(severity) {
+  const current = state.sessions.find((session) => session.lifecycle === 'open');
+  if (!current || shouldAutoClose(current)) {
+    await refreshSessions();
+    render();
+    toast('きろくの うけつけは おわったよ。おとなと みてね');
+    return;
+  }
+  const updated = addSymptomRecord(current, severity);
+  const success = await saveWithFeedback(() => putSession(updated), true, () => recordSeverity(severity));
+  if (!success) return;
+  state.sessions = state.sessions.map((session) => session.id === current.id ? updated : session);
+  setUndo({ kind: 'record', sessionId: current.id, previous: current });
+  render();
+}
+
+async function undoLast() {
+  const undo = state.undo;
+  if (!undo) return;
+  let success;
+  if (undo.kind === 'dose') success = await saveWithFeedback(() => deleteSession(undo.sessionId), true);
+  else success = await saveWithFeedback(() => putSession(undo.previous), true);
+  if (!success) return;
+  if (undo.kind === 'dose') {
+    state.pendingWorry = undo.worry;
+    state.worrySkipped = undo.worrySkipped;
+  }
+  state.undo = null;
+  clearTimeout(state.undoTimer);
+  await refreshSessions();
+  render();
+}
+
+async function retrySave() {
+  const retry = state.retryAction;
+  if (!retry) return;
+  state.retryAction = null;
+  state.saveError = false;
+  await retry();
+  render();
+}
+
+async function mutateSession(id, transform) {
+  const current = state.sessions.find((session) => session.id === id);
+  if (!current) return;
+  try {
+    const updated = transform(current);
+    if (updated.lifecycle === 'open' && state.sessions.some((session) => session.id !== id && session.lifecycle === 'open')) {
+      toast('別の記録受付中セッションがあります。'); return;
+    }
+    if (await saveWithFeedback(() => putSession(updated))) {
+      state.sessions = state.sessions.map((session) => session.id === id ? updated : session);
+      render();
+    }
+  } catch (error) { toast(error.message === 'positive_records_exist' ? '症状記録があるため「症状なし」にはできません。' : '操作できませんでした。'); }
+}
+
+async function reopenSelected(id) {
+  await mutateSession(id, reopenSession);
+}
+
+async function removeSession(id) {
+  if (!confirm('このセッションを削除しますか？この操作はバックアップなしでは元に戻せません。')) return;
+  if (await saveWithFeedback(() => deleteSession(id))) {
+    state.sessions = state.sessions.filter((session) => session.id !== id);
+    render();
+  }
+}
+
+async function removeRecord(sessionId, recordId) {
+  if (!confirm('この症状記録を削除しますか？')) return;
+  await mutateSession(sessionId, (session) => deleteSymptomRecord(session, recordId));
+}
+
+async function enterParent(form) {
+  const data = new FormData(form);
+  if (state.settings.parentPinHash) {
+    const hash = await hashPin(data.get('pin') || '');
+    if (hash !== state.settings.parentPinHash) { toast('PINが違います。'); return; }
+  }
+  state.mode = 'parent';
+  state.parentTab = state.settings.setupComplete ? 'dashboard' : 'settings';
+  render();
+}
+
+async function saveSettings(form) {
+  const data = new FormData(form);
+  const childLabel = String(data.get('symptomLabel') || '').trim();
+  if (!/^[ぁ-ゖー\s]+$/u.test(childLabel)) { toast('記録する症状はひらがなで入力してください。'); return; }
+  const pin = String(data.get('parentPin') || '');
+  const settings = {
+    ...state.settings,
+    medicationName: String(data.get('medicationName')).trim(),
+    medicationDose: String(data.get('medicationDose')).trim(),
+    symptomTypeCode: state.settings.symptomTypeCode || 'symptom',
+    parentSymptomLabel: childLabel,
+    childSymptomLabel: childLabel,
+    childModeEnabled: data.has('childModeEnabled'),
+    askPreDoseWorry: data.has('askPreDoseWorry'),
+    showResolutionDurationInChildMode: data.has('showResolutionDurationInChildMode'),
+    emergencyContactLabel: String(data.get('emergencyContactLabel') || '').trim(),
+    emergencyContactValue: String(data.get('emergencyContactValue') || '').trim(),
+    setupComplete: true,
+    ...(pin ? { parentPinHash: await hashPin(pin) } : {})
+  };
+  if (!validateSettings(settings)) { toast('必須項目を入力してください。'); return; }
+  if (await saveWithFeedback(() => putSettings(settings))) {
+    state.settings = settings;
+    toast('設定を保存しました。');
+    render();
+  }
+}
+
+async function saveRecord(form) {
+  const data = new FormData(form);
+  const date = new Date(String(data.get('timestamp')));
+  if (Number.isNaN(date.getTime())) { toast('記録時刻が正しくありません。'); return; }
+  await mutateSession(form.dataset.sessionId, (session) => updateSymptomRecord(session, form.dataset.recordId, {
+    timestamp: localIso(date), severity: Number(data.get('severity'))
+  }));
+}
+
+async function addRecordFromParent(form) {
+  const data = new FormData(form);
+  const raw = String(data.get('timestamp') || '');
+  const date = raw ? new Date(raw) : new Date();
+  if (Number.isNaN(date.getTime())) { toast('記録時刻が正しくありません。'); return; }
+  await mutateSession(form.dataset.sessionId, (session) => addSymptomRecord(session, Number(data.get('severity')), date));
+}
+
+async function saveSessionInfo(form) {
+  const data = new FormData(form);
+  await mutateSession(form.dataset.id, (session) => ({
+    ...session,
+    notes: String(data.get('notes') || ''),
+    conditionCodes: data.getAll('conditions'),
+    conditionOtherText: String(data.get('conditionOtherText') || ''),
+    updatedAt: localIso()
+  }));
+  toast('セッション情報を保存しました。');
+}
+
+async function exportFile(name, content, type) {
+  const file = new File([content], name, { type });
+  try {
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+    } else {
+      const url = URL.createObjectURL(file);
+      const link = document.createElement('a');
+      link.href = url; link.download = name; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    return true;
+  } catch (error) {
+    if (error.name !== 'AbortError') toast('ファイルを保存できませんでした。もう一度お試しください。');
+    return false;
+  }
+}
+
+async function exportBackup() {
+  const saved = await exportFile(`slit-backup-${localDateToday()}.json`, backupJson(state.sessions, state.settings), 'application/json');
+  if (!saved) return;
+  const timestamp = new Date().toISOString();
+  await putMeta('lastBackupAt', timestamp);
+  state.lastBackupAt = timestamp;
+  render();
+}
+
+async function readImportFile(file) {
+  if (!file) return;
+  try {
+    state.importPreview = validateBackup(JSON.parse(await file.text()));
+    render();
+  } catch (error) { state.importPreview = null; toast(error.message); }
+}
+
+async function importConfirmed() {
+  if (!state.importPreview) return;
+  if (!confirm('現在の全データを置換します。実行前のバックアップを保存しましたか？')) return;
+  const preview = state.importPreview;
+  if (await saveWithFeedback(() => replaceAllData(preview.sessions, { ...DEFAULT_SETTINGS, ...preview.settings }))) {
+    state.importPreview = null;
+    state.settings = { ...DEFAULT_SETTINGS, ...preview.settings };
+    await refreshSessions();
+    toast('バックアップを復元しました。');
+    render();
+  }
+}
+
+async function removeAll(form) {
+  const data = new FormData(form);
+  if (data.get('phrase') !== 'すべて削除') { toast('確認語句が一致しません。'); return; }
+  if (!confirm(`${state.sessions.length}件を完全に削除しますか？`)) return;
+  const count = state.sessions.length;
+  if (await saveWithFeedback(deleteAllData)) {
+    state.sessions = [];
+    state.settings = { ...DEFAULT_SETTINGS };
+    state.lastBackupAt = null;
+    toast(`${count}件を削除しました。`);
+    state.parentTab = 'settings';
+    render();
+  }
+}
+
+async function checkPersistence() {
+  if (!navigator.storage?.persisted) { state.storageStatus = 'unavailable'; return; }
+  state.storageStatus = await navigator.storage.persisted() ? 'persistent' : 'bestEffort';
+}
+
+async function requestPersistence() {
+  if (!navigator.storage?.persist) { state.storageStatus = 'unavailable'; render(); return; }
+  const granted = await navigator.storage.persist();
+  state.storageStatus = granted ? 'persistent' : 'denied';
+  render();
+}
+
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.register('./sw.js');
+    if (registration.waiting) state.updateWaiting = true;
+    registration.addEventListener('updatefound', () => {
+      registration.installing?.addEventListener('statechange', () => {
+        if (registration.waiting) { state.updateWaiting = true; if (state.mode === 'parent') toast('更新は次回起動時に適用できます。'); }
+      });
+    });
+  } catch (error) { console.warn('Service Worker registration failed', error); }
+}
+
+async function boot() {
+  try {
+    [state.settings, state.lastBackupAt] = await Promise.all([getSettings(), getMeta('lastBackupAt')]);
+    await refreshSessions();
+    await checkPersistence();
+    render();
+    await registerServiceWorker();
+  } catch (error) {
+    console.error(error);
+    app.innerHTML = `<div class="shell child-shell"><section class="card error-card" role="alert"><h1 class="child-title">きろくを ひらけなかったみたい</h1><p>おとなを よんでね</p><button class="secondary" type="button" onclick="location.reload()">もういちど</button></section></div>`;
+  }
+}
+
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden) return;
+  await refreshSessions();
+  if (state.mode === 'parent' && state.formDirty) return;
+  render();
+});
+
+setInterval(async () => {
+  const openIds = new Set(state.sessions.filter((session) => session.lifecycle === 'open').map((session) => session.id));
+  if (!openIds.size) return;
+  await refreshSessions();
+  if (state.mode === 'parent' && state.formDirty) return;
+  if (state.sessions.some((session) => openIds.has(session.id) && session.lifecycle === 'closed')) render();
+}, 60000);
+
+boot();

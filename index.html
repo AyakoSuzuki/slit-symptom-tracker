@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f7f2e8">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="description" content="舌下免疫療法の服用後の主観的な症状経過を端末内に記録するPWA">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <title>SLIT Symptom Tracker</title>
+</head>
+<body>
+  <a class="skip-link" href="#app">本文へ移動</a>
+  <main id="app" tabindex="-1">
+    <div class="loading" role="status">よみこみちゅう…</div>
+  </main>
+  <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

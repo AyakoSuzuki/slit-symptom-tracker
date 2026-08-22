@@ -326,12 +326,13 @@ function renderData() {
     <p class="privacy">記録はこの端末内に保存され、このアプリによってサーバーへ送信されません。端末、ブラウザ、Webサイトデータの削除等により失われることがあります。定期的にバックアップしてください。</p>
     <p><span class="storage-status">端末への保存: ${esc(storageLabel())}</span></p>
     <p class="privacy">${esc(storageHelp())}</p>
-    ${state.storageStatus === 'persistent' ? '' : '<div class="button-row"><button class="secondary" type="button" data-action="request-persist">記録を消えにくくする</button></div>'}
+    ${state.storageStatus === 'persistent' ? '' : `<p class="privacy">下のボタンを押すと、ブラウザに「この記録を自動で削除しないでほしい」と要求します。端末の空き容量が少ないときに記録が消えるのを防ぎやすくなります。ブラウザが断ることもあります。</p>
+      <div class="button-row"><button class="secondary" type="button" data-action="request-persist">記録の自動削除を防ぐ</button></div>`}
     <hr><h3>記録をバックアップする</h3>
     <p>最後にバックアップした日時: ${state.lastBackupAt ? esc(displayDate(state.lastBackupAt)) : 'まだバックアップしていません'}</p>
     <p class="privacy">別の端末へ記録を移すときや、端末を買い替えるときは、このファイルを保存してください。下の「バックアップから記録を戻す」で読み込めます。</p>
     <div class="button-row"><button class="primary small" type="button" data-action="export-backup">記録をバックアップ</button></div>
-    <details class="extra"><summary>CSVで書き出す（表計算ソフト用）</summary>
+    <details class="extra"><summary>CSVで書き出す</summary>
       <p class="privacy">バックアップとは別の形式です。ExcelやNumbersで見るためのもので、このファイルから記録を戻すことはできません。</p>
       <div class="button-row"><button class="secondary" type="button" data-action="export-summary">記録の一覧表（CSV）</button>
         <button class="secondary" type="button" data-action="export-series">詳しい経過（CSV）</button></div></details>

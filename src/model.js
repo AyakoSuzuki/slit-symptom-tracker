@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.4.1';
+export const APP_VERSION = '0.4.2';
 export const SCHEMA_VERSION = 1;
 export const AUTO_CLOSE_MINUTES = 60;
 export const SEVERITIES = [0, 1, 2, 3, 4, 5];

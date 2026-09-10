@@ -6,9 +6,18 @@ function node(name, attributes = {}) {
   return element;
 }
 
+const INFERRED_COLOR = '#7d968f';
+
 function marker(shape, cx, cy, color) {
   if (shape === 'square') {
     return node('rect', { x: cx - 4.5, y: cy - 4.5, width: 9, height: 9, fill: '#fff', stroke: color, 'stroke-width': 3 });
+  }
+  // 推定値は形でも区別する（色だけに頼らない）
+  if (shape === 'diamond') {
+    return node('path', {
+      d: `M${cx} ${cy - 6}L${cx + 6} ${cy}L${cx} ${cy + 6}L${cx - 6} ${cy}Z`,
+      fill: '#fff', stroke: color, 'stroke-width': 2.5, 'stroke-linejoin': 'round'
+    });
   }
   return node('circle', { cx, cy, r: 5, fill: '#fff', stroke: color, 'stroke-width': 3 });
 }
@@ -73,7 +82,9 @@ function renderChart(container, seriesList, options = {}) {
       svg.append(line);
     }
     item.points.forEach((point) => {
-      const dot = marker(item.marker, x(point.x), y(point.y), item.color);
+      const dot = point.inferred
+        ? marker('diamond', x(point.x), y(point.y), INFERRED_COLOR)
+        : marker(item.marker, x(point.x), y(point.y), item.color);
       const title = node('title');
       title.textContent = `${point.label || ''} ${point.y}`.trim();
       dot.append(title);

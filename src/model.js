@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.4.2';
+export const APP_VERSION = '0.4.3';
 export const SCHEMA_VERSION = 1;
 export const AUTO_CLOSE_MINUTES = 60;
 export const SEVERITIES = [0, 1, 2, 3, 4, 5];
@@ -85,11 +85,20 @@ export function deriveMetrics(session) {
   const closedEpisodes = episodes.filter((episode) => episode.endedAt);
   const lastResolution = closedEpisodes.at(-1)?.endedAt;
   const lastClosedEpisode = closedEpisodes.at(-1);
+  // 0だけを記録した回や保護者が症状なしを確認した回も、最大強度0の実測値として扱う。
+  // 症状のあった回だけを対象にすると、中央値やグラフが実際より高く出る。
+  const maximumSeverity = records.length
+    ? Math.max(...records.map((record) => record.severity))
+    : (session.noSymptomConfirmedAt ? 0 : undefined);
+  // 服用の記録はあるが症状の記録が一度もない回は、局所反応がなかったものとして0とみなす。
+  // 実測値ではないため isInferred で区別し、CSV / JSON には推定値を出さない。
   return {
     outcome: deriveOutcome(session),
     firstRecordedSymptomAt: positives[0]?.timestamp,
     firstRecordedLatency: positives[0] ? minutesBetween(positives[0].timestamp, session.doseTimestamp) : undefined,
-    maximumSeverity: positives.length ? Math.max(...positives.map((record) => record.severity)) : undefined,
+    maximumSeverity,
+    effectiveMaximumSeverity: maximumSeverity ?? 0,
+    maximumSeverityIsInferred: maximumSeverity === undefined,
     lastRecordedSeverity: records.at(-1)?.severity,
     lastEpisodeDuration: lastClosedEpisode
       ? minutesBetween(lastClosedEpisode.endedAt, lastClosedEpisode.startedAt)
@@ -206,17 +215,19 @@ export function dashboardSummary(sessions) {
   const metrics = sessions.map((session) => ({ session, metrics: deriveMetrics(session) }));
   const count = sessions.length;
   const outcomes = (name) => metrics.filter((item) => item.metrics.outcome === name).length;
-  const symptomatic = metrics.filter((item) => item.metrics.maximumSeverity !== undefined);
-  const resolved = metrics.filter((item) => item.metrics.outcome === 'resolved');
+  const symptomatic = metrics.filter((item) => item.metrics.maximumSeverity > 0);
+  // 未解決の回は症状時間が確定しないため中央値から外す。それ以外（症状なしを含む）は対象にする。
+  const withDuration = metrics.filter((item) => item.metrics.outcome !== 'unresolved');
   return {
     count,
     noSymptomRate: count ? outcomes('noSymptomReported') / count : undefined,
     symptomaticRate: count ? symptomatic.length / count : undefined,
     noDataRate: count ? outcomes('noSymptomData') / count : undefined,
-    medianMaximumSeverity: median(symptomatic.map((item) => item.metrics.maximumSeverity)),
-    medianDuration: median(resolved.map((item) => item.metrics.totalSymptomaticTime)),
+    medianMaximumSeverity: median(metrics.map((item) => item.metrics.effectiveMaximumSeverity)),
+    medianDuration: median(withDuration.map((item) => item.metrics.totalSymptomaticTime)),
     medianFirstLatency: median(symptomatic.map((item) => item.metrics.firstRecordedLatency)),
-    unresolvedCount: outcomes('unresolved')
+    unresolvedCount: outcomes('unresolved'),
+    inferredCount: metrics.filter((item) => item.metrics.maximumSeverityIsInferred).length
   };
 }
 

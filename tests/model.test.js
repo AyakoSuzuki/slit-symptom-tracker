@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
-  createSession, deriveMetrics, deriveOutcome, formatJapaneseMinutes, reopenSession
+  createSession, dashboardSummary, deriveMetrics, deriveOutcome, formatJapaneseMinutes, reopenSession
 } from '../src/model.js';
 
 const settings = {
@@ -116,6 +116,40 @@ test('終了表示用に最後のepisodeのdurationを導出する', () => {
   assert.equal(metrics.lastEpisodeDuration, 3);
   const reopened = addSymptomRecord(session, 2, at(16));
   assert.equal(deriveMetrics(reopened).lastEpisodeDuration, 3);
+});
+
+test('0だけの記録と保護者確認を最大強度0の実測値として扱う', () => {
+  const empty = createSession(settings, undefined, at(0));
+  assert.equal(deriveMetrics(empty).maximumSeverity, undefined);
+  assert.equal(deriveMetrics(empty).effectiveMaximumSeverity, 0);
+  assert.equal(deriveMetrics(empty).maximumSeverityIsInferred, true);
+
+  const zeroOnly = addSymptomRecord(empty, 0, at(3));
+  assert.equal(deriveMetrics(zeroOnly).maximumSeverity, 0);
+  assert.equal(deriveMetrics(zeroOnly).maximumSeverityIsInferred, false);
+
+  const confirmed = confirmNoSymptoms(empty, at(3));
+  assert.equal(deriveMetrics(confirmed).maximumSeverity, 0);
+  assert.equal(deriveMetrics(confirmed).maximumSeverityIsInferred, false);
+});
+
+test('中央値は症状のなかった回も分母に含める', () => {
+  const build = (severities) => {
+    let session = createSession(settings, undefined, at(0));
+    severities.forEach((value, index) => { session = addSymptomRecord(session, value, at(index + 1)); });
+    return session;
+  };
+  // 症状のあった回1つと、0だけの回3つ
+  const sessions = [build([4, 0]), build([0]), build([0]), build([0])];
+  const summary = dashboardSummary(sessions);
+  assert.equal(summary.medianMaximumSeverity, 0);
+  assert.equal(summary.symptomaticRate, 0.25);
+  assert.equal(summary.inferredCount, 0);
+
+  // 症状の記録がない回は0とみなし、推定件数として数える
+  const withInferred = dashboardSummary([...sessions, createSession(settings, undefined, at(0))]);
+  assert.equal(withInferred.inferredCount, 1);
+  assert.equal(withInferred.noDataRate, 0.2);
 });
 
 test('明示的な分表記を使う', () => {

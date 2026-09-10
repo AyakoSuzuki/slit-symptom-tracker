@@ -232,13 +232,15 @@ function renderDashboard() {
       </select></label></div>
     ${backupAge >= 30 ? '<p class="notice">バックアップがまだないか、最後のバックアップから30日以上経過しています。データ画面から記録をバックアップできます。</p>' : ''}
     <div class="stats">
-      ${stat('服用回数', summary.count)}${stat('症状なし', percent(summary.noSymptomRate))}
-      ${stat('症状記録あり', percent(summary.symptomaticRate))}${stat('記録なし', percent(summary.noDataRate))}
+      ${stat('服用回数', summary.count)}${stat('症状なしと記録', percent(summary.noSymptomRate))}
+      ${stat('症状あり', percent(summary.symptomaticRate))}${stat('症状の記録なし', percent(summary.noDataRate))}
       ${stat('最大強度の中央値', numberOrDash(summary.medianMaximumSeverity))}${stat('持続時間の中央値', numberOrDash(summary.medianDuration, '分'))}
       ${stat('最初の記録までの中央値', numberOrDash(summary.medianFirstLatency, '分'))}${stat('おさまった記録なし', summary.unresolvedCount)}
-    </div><p class="privacy">記録操作の時刻に基づく観察データです。実際の発症・消失時刻や医学的な緊急度を示すものではありません。</p>
-    <div class="chart-grid"><article class="chart-card"><h3>症状時間の推移</h3><div id="duration-chart"></div></article>
-      <article class="chart-card"><h3>最大強度の推移</h3><div id="maximum-chart"></div></article>
+    </div><p class="privacy">記録操作の時刻に基づく観察データです。実際の発症・消失時刻や医学的な緊急度を示すものではありません。<br>
+      「最大強度の中央値」は、症状のあった回だけでなく全ての回を対象にしています。症状の記録がない回は0として数えています。</p>
+    <div class="chart-grid"><article class="chart-card"><h3>症状時間の推移</h3><div id="duration-chart"></div>
+      <p class="privacy">症状が続いたまま受付が終了した回は、時間が確定しないため表示しません。</p></article>
+      <article class="chart-card"><h3>最大強度の推移</h3><div id="maximum-chart"></div><p id="inferred-note" class="privacy"></p></article>
       <article class="chart-card"><h3>心配度と最大強度</h3><div id="worry-chart"></div><p id="worry-missing" class="privacy"></p></article></div>
   </div></section>`;
 }
@@ -440,19 +442,30 @@ function render() {
 function mountCharts() {
   if (state.parentTab === 'dashboard') {
     const sessions = [...filteredSessions()].reverse();
+    const summary = dashboardSummary(sessions);
     const dated = sessions.map((session, index) => ({ session, metrics: deriveMetrics(session), index }));
-    lineChart(document.querySelector('#duration-chart'), dated.filter((item) => item.metrics.outcome === 'resolved').map((item) => ({
-      x: item.index, y: item.metrics.totalSymptomaticTime, label: item.session.localDate.slice(5)
-    })), { ariaLabel: '解決済みセッションの症状時間合計の推移', emptyText: '解決済みの記録がありません。' });
-    lineChart(document.querySelector('#maximum-chart'), dated.filter((item) => item.metrics.maximumSeverity !== undefined).map((item) => ({
-      x: item.index, y: item.metrics.maximumSeverity, label: item.session.localDate.slice(5)
+    const pointLabel = (item) => `${item.session.localDate.slice(5)}${item.metrics.maximumSeverityIsInferred ? '（症状の記録なし）' : ''}`;
+    lineChart(document.querySelector('#duration-chart'), dated.filter((item) => item.metrics.outcome !== 'unresolved').map((item) => ({
+      x: item.index, y: item.metrics.totalSymptomaticTime,
+      inferred: item.metrics.maximumSeverityIsInferred, label: pointLabel(item)
+    })), { ariaLabel: '症状時間合計の推移', emptyText: '表示できる記録がありません。' });
+    lineChart(document.querySelector('#maximum-chart'), dated.map((item) => ({
+      x: item.index, y: item.metrics.effectiveMaximumSeverity,
+      inferred: item.metrics.maximumSeverityIsInferred, label: pointLabel(item)
     })), { yMax: 5, ariaLabel: '最大症状強度の推移' });
-    const worry = dated.filter((item) => item.session.preDoseWorry !== undefined && item.metrics.maximumSeverity !== undefined);
+    const inferredNote = document.querySelector('#inferred-note');
+    if (inferredNote) {
+      inferredNote.textContent = summary.inferredCount
+        ? `◇ ${summary.inferredCount}件は、服用の記録はあるが症状の記録がない回です。症状はなかったものとして0に置いています。書き出すCSVには推定値を入れず、空欄のままにします。`
+        : 'すべての回に症状の記録があります。';
+    }
+    const worry = dated.filter((item) => item.session.preDoseWorry !== undefined);
     comparisonChart(document.querySelector('#worry-chart'), [
       { name: '心配度', color: '#526b88', dash: '6 4', marker: 'square',
         points: worry.map((item, index) => ({ x: index, y: item.session.preDoseWorry, label: `${item.session.localDate.slice(5)} 心配度` })) },
       { name: '最大強度', color: '#2d6658', marker: 'circle',
-        points: worry.map((item, index) => ({ x: index, y: item.metrics.maximumSeverity, label: `${item.session.localDate.slice(5)} 最大強度` })) }
+        points: worry.map((item, index) => ({ x: index, y: item.metrics.effectiveMaximumSeverity,
+          inferred: item.metrics.maximumSeverityIsInferred, label: `${item.session.localDate.slice(5)} 最大強度` })) }
     ], { yMax: 5, ariaLabel: '記録された心配度と最大症状強度の比較', emptyText: `比較できる記録がありません。欠測 ${sessions.length - worry.length}件` });
     const missing = document.querySelector('#worry-missing');
     if (missing) missing.textContent = `欠測 ${sessions.length - worry.length}件。因果関係や評価を示すグラフではありません。`;

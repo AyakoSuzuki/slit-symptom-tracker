@@ -30,6 +30,22 @@ test('未解決セッションの時間列を空欄にする', () => {
   assert.equal(values[SUMMARY_COLUMNS.indexOf('time_from_dose_to_last_resolution_min')], '');
 });
 
+test('0の記録は0、症状の記録なしは空欄で書き出す（推定値を入れない）', () => {
+  const base = { ...settings, medicationName: '薬' };
+  const noRecords = createSession(base, undefined, new Date('2026-08-19T12:00:00+09:00'));
+  const zeroOnly = addSymptomRecord(noRecords, 0, new Date('2026-08-19T12:05:00+09:00'));
+  const rows = summaryCsv([noRecords, zeroOnly]).split('\r\n');
+  const maxIndex = SUMMARY_COLUMNS.indexOf('max_severity');
+  const outcomeIndex = SUMMARY_COLUMNS.indexOf('outcome');
+
+  // 症状の記録がない回: グラフでは0とみなすが、CSVには推定値を出さない
+  assert.equal(rows[1].split(',')[outcomeIndex], 'noSymptomData');
+  assert.equal(rows[1].split(',')[maxIndex], '');
+  // 0を記録した回: 実測値なので0と書き出す
+  assert.equal(rows[2].split(',')[outcomeIndex], 'noSymptomReported');
+  assert.equal(rows[2].split(',')[maxIndex], '0');
+});
+
 test('version 1 backupを往復し未知versionを拒否する', () => {
   const json = backupJson([], settings, '2026-08-19T00:00:00.000Z');
   const value = validateBackup(JSON.parse(json));

@@ -56,8 +56,28 @@ function displayTime(timestamp) {
   return timestamp.slice(11, 16);
 }
 
-function inputDateTime(timestamp) {
-  return timestamp ? timestamp.slice(0, 16) : '';
+function inputTime(timestamp) {
+  return timestamp ? timestamp.slice(11, 16) : '';
+}
+
+// 記録の日付は保ったまま、時刻だけを差し替える。日をまたいだ記録の日付を壊さない。
+function replaceTime(timestamp, time) {
+  const [hours, minutes] = time.split(':');
+  const date = new Date(timestamp);
+  date.setHours(Number(hours), Number(minutes), 0, 0);
+  return localIso(date);
+}
+
+function monthLabel(localDate) {
+  return `${localDate.slice(0, 4)}年${Number(localDate.slice(5, 7))}月`;
+}
+
+// セッションの自由記述は、旧「メモ」と「その他の体調」を1つにまとめて表示する。
+// 保存時に conditionOtherText へ寄せ、notes は空にする（既存の記述を失わないため）。
+function sessionFreeText(session) {
+  return [session.conditionOtherText, session.notes]
+    .filter((value) => value && String(value).trim())
+    .join('\n');
 }
 
 function percent(value) {
@@ -255,13 +275,26 @@ function renderHistory() {
   return `<section><div class="card"><div class="topbar"><h2 class="panel-title">履歴</h2>
     <button class="primary small" type="button" data-action="parent-start-dose" ${open ? 'disabled' : ''}>${todayCount ? '同日の新しい服用記録' : '新しい服用記録'}</button></div>
     ${open ? '<p class="notice">記録受付中のセッションがあります。新しい服用記録を作るには、先にそのセッションを閉じてください。</p>' : ''}
-    ${state.sessions.length ? state.sessions.map(historyItem).join('') : '<p>まだ記録がありません。</p>'}</div></section>`;
+    ${state.sessions.length ? monthGroups(state.sessions).map((group, index) => `<details class="month-group" ${index === 0 ? 'open' : ''}>
+      <summary>${esc(monthLabel(group.key))}<span class="month-count">${group.sessions.length}回</span></summary>
+      ${group.sessions.map(historyItem).join('')}</details>`).join('') : '<p>まだ記録がありません。</p>'}</div></section>`;
+}
+
+// 記録が増えても一覧が長くなりすぎないよう、月ごとにまとめて最新の月だけ開く。
+function monthGroups(sessions) {
+  const groups = [];
+  for (const session of sessions) {
+    const key = session.localDate.slice(0, 7);
+    if (groups.at(-1)?.key !== key) groups.push({ key, sessions: [] });
+    groups.at(-1).sessions.push(session);
+  }
+  return groups;
 }
 
 function historyItem(session) {
   const metrics = deriveMetrics(session);
   const open = session.lifecycle === 'open';
-  return `<details class="history-item"><summary>${esc(session.localDate)} ${esc(displayTime(session.doseTimestamp))}
+  return `<details class="history-item"><summary>${Number(session.localDate.slice(8, 10))}日 ${esc(displayTime(session.doseTimestamp))}
     ${open ? '<span class="badge open">記録受付中</span>' : ''}<span class="badge">${esc(outcomeLabels[metrics.outcome])}</span></summary>
     <div class="history-body">
       <dl class="state-pair">
@@ -269,6 +302,7 @@ function historyItem(session) {
         <div><dt>症状の結果</dt><dd>${esc(outcomeLabels[metrics.outcome])}</dd></div>
       </dl>
       <p><strong>${esc(session.medication.name)} ${esc(session.medication.dose)}</strong><br>
+      服用前の心配度: ${session.preDoseWorry === undefined ? '記録なし' : `${session.preDoseWorry} ${esc(severityLabels[session.preDoseWorry])}`}<br>
       最初の症状記録: ${esc(displayDate(metrics.firstRecordedSymptomAt))}<br>最大強度: ${numberOrDash(metrics.maximumSeverity)} / episode: ${metrics.episodeCount}<br>
       症状時間合計: ${metrics.outcome === 'unresolved' ? 'おさまった記録がないため空欄' : numberOrDash(metrics.totalSymptomaticTime, '分')}</p>
       <div id="session-chart-${esc(session.id)}" class="chart-card"></div><hr>
@@ -279,20 +313,25 @@ function historyItem(session) {
         <button class="secondary danger" type="button" data-action="delete-session" data-id="${esc(session.id)}">セッションを削除</button></div>
       <h3>症状記録</h3>${session.symptomRecords.length ? session.symptomRecords.map((record) => recordEditor(session, record)).join('') : '<p>記録なし</p>'}
       ${session.lifecycle === 'open' ? `<form class="record-row" data-form="record-add" data-session-id="${esc(session.id)}">
-        <label class="field"><span>記録時刻（空欄なら現在時刻）</span><input type="datetime-local" name="timestamp"></label>
+        <label class="field"><span>時刻（空欄なら今）</span><input type="time" name="time"></label>
         <label class="field"><span>強度</span><select name="severity">${[0,1,2,3,4,5].map((value) => `<option>${value}</option>`).join('')}</select></label>
         <div class="record-actions"><button class="secondary" type="submit">記録を追加</button></div></form>` : ''}
       <form data-form="session-edit" data-id="${esc(session.id)}"><div class="form-grid">
-        <label class="field full"><span>メモ</span><textarea name="notes">${esc(session.notes)}</textarea></label>
+        <label class="field"><span>服用前の心配度</span><select name="preDoseWorry">
+          <option value="" ${session.preDoseWorry === undefined ? 'selected' : ''}>記録なし</option>
+          ${[0,1,2,3,4,5].map((value) => `<option value="${value}" ${session.preDoseWorry === value ? 'selected' : ''}>${value} ${esc(severityLabels[value])}</option>`).join('')}
+        </select></label>
         <fieldset class="field full"><legend>体調</legend><div class="button-row">${conditionChecks(session)}</div></fieldset>
-        <label class="field full"><span>その他の体調</span><input name="conditionOtherText" value="${esc(session.conditionOtherText)}"></label>
-      </div><button class="secondary" type="submit">セッション情報を保存</button></form>
+        <label class="field full"><span>その他</span><textarea name="conditionOtherText">${esc(sessionFreeText(session))}</textarea></label>
+      </div><button class="secondary form-submit" type="submit">セッション情報を保存</button></form>
     </div></details>`;
 }
 
 function recordEditor(session, record) {
+  // 同じ日の記録は時刻だけで足りる。日をまたいだ記録のときだけ日付を添える。
+  const otherDay = record.timestamp.slice(0, 10) !== session.localDate;
   return `<form class="record-row" data-form="record-edit" data-session-id="${esc(session.id)}" data-record-id="${esc(record.id)}">
-    <label class="field"><span>記録時刻</span><input type="datetime-local" name="timestamp" value="${esc(inputDateTime(record.timestamp))}" required></label>
+    <label class="field"><span>時刻${otherDay ? `（${Number(record.timestamp.slice(5, 7))}/${Number(record.timestamp.slice(8, 10))}）` : ''}</span><input type="time" name="time" value="${esc(inputTime(record.timestamp))}" required></label>
     <label class="field"><span>強度</span><select name="severity">${[0,1,2,3,4,5].map((value) => `<option ${record.severity===value?'selected':''}>${value}</option>`).join('')}</select></label>
     <div class="record-actions button-row"><button class="secondary" type="submit">保存</button><button class="secondary danger" type="button" data-action="delete-record" data-session-id="${esc(session.id)}" data-record-id="${esc(record.id)}">削除</button></div>
   </form>`;
@@ -675,30 +714,45 @@ async function saveSettings(form) {
 
 async function saveRecord(form) {
   const data = new FormData(form);
-  const date = new Date(String(data.get('timestamp')));
-  if (Number.isNaN(date.getTime())) { toast('記録時刻が正しくありません。'); return; }
+  const time = String(data.get('time') || '');
+  if (!/^\d{1,2}:\d{2}$/.test(time)) { toast('時刻が正しくありません。'); return; }
+  const record = state.sessions.find((session) => session.id === form.dataset.sessionId)
+    ?.symptomRecords.find((item) => item.id === form.dataset.recordId);
+  if (!record) return;
   await mutateSession(form.dataset.sessionId, (session) => updateSymptomRecord(session, form.dataset.recordId, {
-    timestamp: localIso(date), severity: Number(data.get('severity'))
+    timestamp: replaceTime(record.timestamp, time), severity: Number(data.get('severity'))
   }));
 }
 
 async function addRecordFromParent(form) {
   const data = new FormData(form);
-  const raw = String(data.get('timestamp') || '');
-  const date = raw ? new Date(raw) : new Date();
-  if (Number.isNaN(date.getTime())) { toast('記録時刻が正しくありません。'); return; }
+  const time = String(data.get('time') || '');
+  const date = new Date();
+  if (time) {
+    if (!/^\d{1,2}:\d{2}$/.test(time)) { toast('時刻が正しくありません。'); return; }
+    const [hours, minutes] = time.split(':');
+    date.setHours(Number(hours), Number(minutes), 0, 0);
+  }
   await mutateSession(form.dataset.sessionId, (session) => addSymptomRecord(session, Number(data.get('severity')), date));
 }
 
 async function saveSessionInfo(form) {
   const data = new FormData(form);
-  await mutateSession(form.dataset.id, (session) => ({
-    ...session,
-    notes: String(data.get('notes') || ''),
-    conditionCodes: data.getAll('conditions'),
-    conditionOtherText: String(data.get('conditionOtherText') || ''),
-    updatedAt: localIso()
-  }));
+  const worry = String(data.get('preDoseWorry') ?? '');
+  await mutateSession(form.dataset.id, (session) => {
+    const updated = {
+      ...session,
+      // 自由記述は「その他」に一本化する。旧メモは表示時に統合済みなのでここで空にする。
+      notes: '',
+      conditionCodes: data.getAll('conditions'),
+      conditionOtherText: String(data.get('conditionOtherText') || ''),
+      updatedAt: localIso()
+    };
+    // 未入力の心配度と0を区別するため、記録なしのときはキーごと消す。
+    if (worry === '') delete updated.preDoseWorry;
+    else updated.preDoseWorry = Number(worry);
+    return updated;
+  });
   toast('セッション情報を保存しました。');
 }
 

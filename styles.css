@@ -57,6 +57,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .scale-number { font-size: 1.35rem; line-height: 1; }
 .scale-label { min-height: 2.4em; display: grid; place-items: start center; font-size: .75rem; line-height: 1.2; color: var(--muted); }
 .result-card { border-left: 6px solid var(--mint-strong); padding: 14px 16px; background: rgba(255,255,255,.72); border-radius: 12px; margin: 14px 0; }
+.dose-timer { display: flex; align-items: center; gap: 14px; margin: 14px 0; padding: 12px 14px; background: rgba(255,255,255,.82); border-radius: 16px; }
+.dose-timer.wait { display: block; }
+.timer-ring { width: 64px; height: 64px; flex: none; transform: rotate(-90deg); }
+.ring-track { fill: none; stroke: #ddd6ea; stroke-width: 8; }
+.ring-fill { fill: none; stroke: var(--mint-strong); stroke-width: 8; stroke-linecap: round; transition: stroke-dashoffset 1s linear; }
+.timer-lead { margin: 0 0 4px; font-size: 1.4rem; font-weight: 800; }
+.timer-text { margin: 0; font-size: 1.1rem; font-weight: 700; line-height: 1.5; }
+.timer-done { margin: 12px 0 0; font-weight: 750; color: var(--mint-strong); }
+/* ひらがなの文言は語の区切り（空白）でだけ折り返し、「ね」などの1文字だけが次の行に残らないようにする */
+.timer-lead, .timer-text, .timer-done { word-break: keep-all; overflow-wrap: break-word; text-wrap: balance; }
 .undo-bar { position: sticky; bottom: max(12px, env(safe-area-inset-bottom)); z-index: 4; display: flex; justify-content: space-between; align-items: center; gap: 10px; color: white; background: #304c49; padding: 11px 14px; border-radius: 14px; box-shadow: var(--shadow); }
 .undo-bar button { border: 1px solid white; background: transparent; color: white; border-radius: 10px; padding: 6px 12px; }
 .error-card { border: 2px solid #7b3041; background: #fff8f9; }

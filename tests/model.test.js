@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
-  createSession, dashboardSummary, deriveMetrics, deriveOutcome, formatJapaneseMinutes, reopenSession
+  createSession, dashboardSummary, deriveMetrics, deriveOutcome, doseTimerPhase, formatJapaneseMinutes,
+  isValidTimerMinutes, reopenSession
 } from '../src/model.js';
 
 const settings = {
@@ -150,6 +151,35 @@ test('中央値は症状のなかった回も分母に含める', () => {
   const withInferred = dashboardSummary([...sessions, createSession(settings, undefined, at(0))]);
   assert.equal(withInferred.inferredCount, 1);
   assert.equal(withInferred.noDataRate, 0.2);
+});
+
+test('服用手順タイマーは設定した分数で段階を切り替える', () => {
+  const session = createSession(settings, undefined, at(0));
+  const on = { ...settings, doseTimerEnabled: true, holdMinutes: 1, waitMinutes: 5 };
+  const sec = (seconds) => new Date(at(0).getTime() + seconds * 1000);
+
+  // 既定オフ、分数の未入力、時計の逆行ではタイマーを出さない
+  assert.equal(doseTimerPhase(session, settings, sec(10)), undefined);
+  assert.equal(doseTimerPhase(session, { ...on, waitMinutes: '' }, sec(10)), undefined);
+  assert.equal(doseTimerPhase(session, on, sec(-5)), undefined);
+
+  assert.deepEqual(doseTimerPhase(session, on, sec(0)), { phase: 'hold', progress: 0 });
+  assert.equal(doseTimerPhase(session, on, sec(30)).progress, 0.5);
+  // 保持時間が終わったら「のみこんでね」、そこから待ち時間を数える
+  assert.deepEqual(doseTimerPhase(session, on, sec(60)), { phase: 'wait', remainingMinutes: 5 });
+  assert.equal(doseTimerPhase(session, on, sec(359)).remainingMinutes, 1);
+  // 飲食してよいのは保持＋待ちの合計（1＋5＝6分）から
+  assert.deepEqual(doseTimerPhase(session, on, sec(360)), { phase: 'done' });
+  assert.deepEqual(doseTimerPhase(session, on, sec(40 * 60)), { phase: 'done' });
+});
+
+test('タイマーの分数は1〜30の整数だけを受け付ける', () => {
+  assert.ok(isValidTimerMinutes('1'));
+  assert.ok(isValidTimerMinutes(30));
+  assert.ok(!isValidTimerMinutes('0'));
+  assert.ok(!isValidTimerMinutes('31'));
+  assert.ok(!isValidTimerMinutes('1.5'));
+  assert.ok(!isValidTimerMinutes(''));
 });
 
 test('明示的な分表記を使う', () => {

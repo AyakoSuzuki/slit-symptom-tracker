@@ -1,7 +1,8 @@
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deleteSymptomRecord, deriveMetrics, formatJapaneseMinutes,
-  localIso, minutesBetween, reopenSession, shouldAutoClose, updateSymptomRecord, validateSettings
+  doseTimerPhase, isValidTimerMinutes, localIso, minutesBetween, reopenSession, shouldAutoClose,
+  updateSymptomRecord, validateSettings
 } from './model.js';
 import {
   deleteAllData, deleteSession, getMeta, getSessions, getSettings, putMeta, putSession,
@@ -25,6 +26,11 @@ const state = {
   saveError: false,
   retryAction: null,
   formDirty: false,
+  timerInterval: null,
+  timerPhase: undefined,
+  wakeLock: null,
+  wakeLockPending: false,
+  wakeLockWanted: false,
   storageStatus: 'checking',
   lastBackupAt: null,
   importPreview: null,
@@ -181,12 +187,106 @@ function renderActiveChild(session) {
   }
   return `<div class="shell child-shell">${childHeader()}<section class="card lavender">
     <p class="eyebrow">おくすり のんだよ</p><p class="dose-time">${esc(displayTime(session.doseTimestamp))}</p>
-    <p class="helper">${esc(session.medication.name)}</p>${result}
+    <p class="helper">${esc(session.medication.name)}</p>${doseTimerMarkup(session)}${result}
   </section><section class="card mint" id="severity-card">
     <p class="question">いま ${esc(session.symptom.childLabel)}は<br>どんなかんじ？</p>
     ${severityPicker(metrics.lastRecordedSeverity)}
     <p class="helper">かわったときだけ おしてね</p>
   </section>${saveErrorCard()}${renderUndo()}</div>`;
+}
+
+const TIMER_RING_CIRCUMFERENCE = 2 * Math.PI * 26;
+
+const timerMessages = {
+  hold: 'したの したに おいたまま まってね',
+  wait: 'のみこんでね',
+  done: 'たべたり のんだり していいよ'
+};
+
+function doseTimerMarkup(session) {
+  const timer = doseTimerPhase(session, state.settings);
+  if (!timer) return '';
+  if (timer.phase === 'done') return `<p class="timer-done">${timerMessages.done}</p>`;
+  if (timer.phase === 'hold') {
+    return `<div id="dose-timer" class="dose-timer" data-session-id="${esc(session.id)}">
+      <svg class="timer-ring" viewBox="0 0 64 64" aria-hidden="true">
+        <circle class="ring-track" cx="32" cy="32" r="26"/>
+        <circle class="ring-fill" cx="32" cy="32" r="26" stroke-dasharray="${TIMER_RING_CIRCUMFERENCE.toFixed(2)}"
+          stroke-dashoffset="${ringOffset(timer.progress)}"/>
+      </svg>
+      <p class="timer-text">${timerMessages.hold}</p></div>`;
+  }
+  return `<div id="dose-timer" class="dose-timer wait" data-session-id="${esc(session.id)}">
+    <p class="timer-lead">${timerMessages.wait}</p>
+    <p class="timer-text">たべたり のんだりは あと <span data-timer-remaining>${formatJapaneseMinutes(timer.remainingMinutes)}</span> まってね</p></div>`;
+}
+
+function ringOffset(progress) {
+  return (TIMER_RING_CIRCUMFERENCE * (1 - Math.min(1, Math.max(0, progress)))).toFixed(2);
+}
+
+// タイマーは該当部分だけを書き換え、段階が変わったときだけ全体を描き直す。
+// 毎秒 render() すると、入力中のフォーカスや undo バーを壊すため。
+function syncDoseTimer() {
+  clearInterval(state.timerInterval);
+  state.timerInterval = null;
+  const element = state.mode === 'child' ? document.querySelector('#dose-timer, .timer-done') : null;
+  const session = element?.id === 'dose-timer'
+    ? state.sessions.find((item) => item.id === element.dataset.sessionId)
+    : state.sessions.find((item) => item.lifecycle === 'open');
+  const timer = element ? doseTimerPhase(session, state.settings) : undefined;
+  if (timer?.phase && state.timerPhase && timer.phase !== state.timerPhase) announce(timerMessages[timer.phase]);
+  state.timerPhase = timer?.phase;
+  const running = timer?.phase === 'hold' || timer?.phase === 'wait';
+  updateWakeLock(running);
+  if (!running) return;
+  state.timerInterval = setInterval(() => {
+    const current = doseTimerPhase(session, state.settings);
+    if (current?.phase !== state.timerPhase) { render(); return; }
+    paintDoseTimer(current);
+  }, 1000);
+}
+
+function paintDoseTimer(timer) {
+  if (timer.phase === 'hold') {
+    document.querySelector('#dose-timer .ring-fill')?.setAttribute('stroke-dashoffset', ringOffset(timer.progress));
+  } else if (timer.phase === 'wait') {
+    const remaining = document.querySelector('[data-timer-remaining]');
+    const text = formatJapaneseMinutes(timer.remainingMinutes);
+    if (remaining && remaining.textContent !== text) remaining.textContent = text;
+  }
+}
+
+function announce(message) {
+  const region = document.querySelector('#timer-announcer');
+  if (!region) return;
+  // 同じ文言が続いても読み上げられるよう、いったん空にしてから入れる
+  region.textContent = '';
+  setTimeout(() => { region.textContent = message; }, 50);
+}
+
+// タイマーの間だけ画面を消さない。取得できない端末でも、段階は服用時刻から計算するので表示は崩れない。
+async function updateWakeLock(wanted) {
+  state.wakeLockWanted = wanted;
+  if (!('wakeLock' in navigator)) return;
+  if (!wanted) {
+    const lock = state.wakeLock;
+    state.wakeLock = null;
+    if (lock) lock.release().catch(() => {});
+    return;
+  }
+  if (state.wakeLock || state.wakeLockPending || document.hidden) return;
+  state.wakeLockPending = true;
+  try {
+    const lock = await navigator.wakeLock.request('screen');
+    lock.addEventListener('release', () => { if (state.wakeLock === lock) state.wakeLock = null; });
+    if (state.wakeLockWanted) state.wakeLock = lock;
+    else lock.release().catch(() => {});
+  } catch (error) {
+    console.warn('Screen wake lock unavailable', error);
+  } finally {
+    state.wakeLockPending = false;
+  }
 }
 
 function renderClosedToday(session) {
@@ -357,6 +457,14 @@ function renderSettings() {
       <label class="check field full"><input type="checkbox" name="childModeEnabled" ${s.childModeEnabled?'checked':''}><span>子ども画面を使用する</span></label>
       <label class="check field full"><input type="checkbox" name="askPreDoseWorry" ${s.askPreDoseWorry?'checked':''}><span>服用前の心配度を任意で尋ねる</span></label>
       <label class="check field full"><input type="checkbox" name="showResolutionDurationInChildMode" ${s.showResolutionDurationInChildMode?'checked':''}><span>Child Modeの終了時に所要時間を表示する（既定OFF）</span></label>
+      <fieldset class="field full"><legend>服用手順のタイマー（任意）</legend>
+        <label class="check"><input type="checkbox" name="doseTimerEnabled" ${s.doseTimerEnabled?'checked':''}><span>子ども画面に、服用後の待ち時間を表示する（既定OFF）</span></label>
+        <div class="form-grid">
+          <label class="field"><span>舌の下に置いておく時間（分）</span><input name="holdMinutes" type="number" inputmode="numeric" min="1" max="30" step="1" value="${esc(s.holdMinutes)}"></label>
+          <label class="field"><span>飲み込んだ後、飲食を控える時間（分）</span><input name="waitMinutes" type="number" inputmode="numeric" min="1" max="30" step="1" value="${esc(s.waitMinutes)}"></label>
+        </div>
+        <small class="helper">処方医の指示や薬の説明書に書かれた時間を入力してください。アプリは入力された時間を計って表示するだけで、服用方法を決めるものではありません。アプリを閉じている間は知らせられません。</small>
+      </fieldset>
     </div><p class="privacy">設定変更後も、過去セッションに保存された薬剤名・用量・症状表示名は変わりません。</p>
     <button class="primary small" type="submit">設定を保存</button></form></section>`;
 }
@@ -476,6 +584,7 @@ function render() {
   state.formDirty = false;
   app.innerHTML = state.mode === 'child' ? renderChild() : state.mode === 'gate' ? renderParentGate() : renderParent();
   if (state.mode === 'parent') mountCharts();
+  syncDoseTimer();
 }
 
 function mountCharts() {
@@ -530,7 +639,12 @@ app.addEventListener('click', async (event) => {
   if (action === 'select-worry') { state.pendingWorry = Number(button.dataset.value); state.worrySkipped = false; render(); return; }
   if (action === 'skip-worry') { state.pendingWorry = undefined; state.worrySkipped = true; render(); return; }
   if (action === 'focus-severity') { document.querySelector('#severity-card')?.scrollIntoView({ behavior: 'smooth' }); return; }
-  if (action === 'start-dose') { await startDose(true); return; }
+  if (action === 'start-dose') {
+    // 画面ロック防止はタップの直後に要求しておく（端末によっては操作直後でないと取得できないため）
+    if (state.settings.doseTimerEnabled) updateWakeLock(true);
+    await startDose(true);
+    return;
+  }
   if (action === 'parent-start-dose') { await startDose(false); return; }
   if (action === 'record-severity') { await recordSeverity(Number(button.dataset.value)); return; }
   if (action === 'undo') { await undoLast(); return; }
@@ -689,6 +803,13 @@ async function saveSettings(form) {
   const childLabel = String(data.get('symptomLabel') || '').trim();
   if (!/^[ぁ-ゖー\s]+$/u.test(childLabel)) { toast('記録する症状はひらがなで入力してください。'); return; }
   const pin = String(data.get('parentPin') || '');
+  const doseTimerEnabled = data.has('doseTimerEnabled');
+  const holdMinutes = String(data.get('holdMinutes') || '').trim();
+  const waitMinutes = String(data.get('waitMinutes') || '').trim();
+  if (doseTimerEnabled && !(isValidTimerMinutes(holdMinutes) && isValidTimerMinutes(waitMinutes))) {
+    toast('服用手順のタイマーを使う場合は、2つの時間を1〜30分の整数で入力してください。');
+    return;
+  }
   const settings = {
     ...state.settings,
     medicationName: String(data.get('medicationName')).trim(),
@@ -699,6 +820,9 @@ async function saveSettings(form) {
     childModeEnabled: data.has('childModeEnabled'),
     askPreDoseWorry: data.has('askPreDoseWorry'),
     showResolutionDurationInChildMode: data.has('showResolutionDurationInChildMode'),
+    doseTimerEnabled,
+    holdMinutes: holdMinutes === '' ? '' : Number(holdMinutes),
+    waitMinutes: waitMinutes === '' ? '' : Number(waitMinutes),
     emergencyContactLabel: String(data.get('emergencyContactLabel') || '').trim(),
     emergencyContactValue: String(data.get('emergencyContactValue') || '').trim(),
     setupComplete: true,

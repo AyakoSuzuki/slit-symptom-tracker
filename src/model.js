@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.4.4';
+export const APP_VERSION = '0.4.5';
 export const SCHEMA_VERSION = 1;
 export const AUTO_CLOSE_MINUTES = 60;
 export const SEVERITIES = [0, 1, 2, 3, 4, 5];
@@ -12,6 +12,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
   childModeEnabled: true,
   askPreDoseWorry: true,
   showResolutionDurationInChildMode: false,
+  doseTimerEnabled: false,
+  holdMinutes: '',
+  waitMinutes: '',
   parentPinHash: '',
   emergencyContactLabel: '',
   emergencyContactValue: '',
@@ -237,6 +240,28 @@ export function formatJapaneseMinutes(value) {
   const last = n % 10;
   const pun = lastTwo === 10 || [1, 3, 6, 8].includes(last);
   return `${n}${pun ? 'ぷん' : 'ふん'}`;
+}
+
+// 服用手順のタイマー。分数は保護者が処方医の指示や説明書に従って設定した値を使い、
+// アプリが服用方法を決めることはしない。段階は服用時刻から毎回計算し、保存しない。
+export function doseTimerPhase(session, settings, now = new Date()) {
+  if (!session || !settings?.doseTimerEnabled) return undefined;
+  const hold = Number(settings.holdMinutes);
+  const wait = Number(settings.waitMinutes);
+  if (!(hold > 0) || !(wait > 0)) return undefined;
+  const elapsed = new Date(now).getTime() - new Date(session.doseTimestamp).getTime();
+  if (!Number.isFinite(elapsed) || elapsed < 0) return undefined;
+  const holdEnd = hold * 60000;
+  const waitEnd = holdEnd + wait * 60000;
+  if (elapsed < holdEnd) return { phase: 'hold', progress: elapsed / holdEnd };
+  if (elapsed < waitEnd) return { phase: 'wait', remainingMinutes: Math.ceil((waitEnd - elapsed) / 60000) };
+  return { phase: 'done' };
+}
+
+export function isValidTimerMinutes(value) {
+  if (value === '' || value === null || value === undefined) return false;
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 30;
 }
 
 export function validateSettings(settings) {

@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.4.7';
+export const APP_VERSION = '0.4.8';
 export const SCHEMA_VERSION = 1;
 export const AUTO_CLOSE_MINUTES = 60;
 export const SEVERITIES = [0, 1, 2, 3, 4, 5];
@@ -116,6 +116,13 @@ export function deriveMetrics(session) {
     lastResolution,
     episodes
   };
+}
+
+// 選択枠は、その日に押した値にだけ付ける。日をまたいだセッションでは前日の枠を残さない。
+export function selectedSeverityForDay(session, day) {
+  const last = sortRecords(session.symptomRecords).at(-1);
+  if (!last || last.timestamp.slice(0, 10) !== day) return undefined;
+  return last.severity;
 }
 
 export function createSession(settings, preDoseWorry, now = new Date()) {

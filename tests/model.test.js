@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deriveMetrics, deriveOutcome, doseTimerPhase, formatJapaneseMinutes,
-  isValidTimerMinutes, reopenSession
+  isValidTimerMinutes, reopenSession, selectedSeverityForDay
 } from '../src/model.js';
 
 const settings = {
@@ -180,6 +180,23 @@ test('タイマーの分数は1〜30の整数だけを受け付ける', () => {
   assert.ok(!isValidTimerMinutes('31'));
   assert.ok(!isValidTimerMinutes('1.5'));
   assert.ok(!isValidTimerMinutes(''));
+});
+
+test('選択枠はその日に押した値にだけ付く', () => {
+  const session = createSession(settings, undefined, at(0));
+  const day = session.localDate;
+  assert.equal(selectedSeverityForDay(session, day), undefined);
+
+  const recorded = addSymptomRecord(session, 3, at(5));
+  assert.equal(selectedSeverityForDay(recorded, day), 3);
+  // 翌日から見ると、前日に押した値の枠は残さない
+  const nextDay = new Date(at(0).getTime() + 24 * 60 * 60000);
+  const nextDayString = `${nextDay.getFullYear()}-${String(nextDay.getMonth() + 1).padStart(2, '0')}-${String(nextDay.getDate()).padStart(2, '0')}`;
+  assert.equal(selectedSeverityForDay(recorded, nextDayString), undefined);
+
+  // 0も値として扱う（未選択と区別する）
+  const zero = addSymptomRecord(recorded, 0, at(9));
+  assert.equal(selectedSeverityForDay(zero, day), 0);
 });
 
 test('明示的な分表記を使う', () => {

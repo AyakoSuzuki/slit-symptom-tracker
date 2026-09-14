@@ -1,8 +1,8 @@
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deleteSymptomRecord, deriveMetrics, formatJapaneseMinutes,
-  doseTimerPhase, isValidTimerMinutes, localIso, minutesBetween, reopenSession, shouldAutoClose,
-  updateSymptomRecord, validateSettings
+  doseTimerPhase, isValidTimerMinutes, localIso, minutesBetween, reopenSession,
+  selectedSeverityForDay, shouldAutoClose, updateSymptomRecord, validateSettings
 } from './model.js';
 import {
   deleteAllData, deleteSession, getMeta, getSessions, getSettings, putMeta, putSession,
@@ -36,8 +36,18 @@ const state = {
   importPreview: null,
   updateWaiting: false,
   swRegistration: null,
-  reloadingForUpdate: false
+  reloadingForUpdate: false,
+  uiDate: null
 };
+
+// 日付が変わったら、画面に残っている選択（心配度）を持ち越さない。
+function syncDayChange() {
+  const today = localDateToday();
+  if (state.uiDate === today) return;
+  state.uiDate = today;
+  state.pendingWorry = undefined;
+  state.worrySkipped = false;
+}
 
 const outcomeLabels = {
   resolved: 'おさまった記録あり',
@@ -192,7 +202,7 @@ function renderActiveChild(session) {
     <p class="helper">${esc(session.medication.name)}</p>${doseTimerMarkup(session)}${result}
   </section><section class="card mint" id="severity-card">
     <p class="question">いま ${esc(session.symptom.childLabel)}は<br>どんなかんじ？</p>
-    ${severityPicker(metrics.lastRecordedSeverity)}
+    ${severityPicker(selectedSeverityForDay(session, localDateToday()))}
     <p class="helper">かわったときだけ おしてね</p>
   </section>${saveErrorCard()}${renderUndo()}</div>`;
 }
@@ -585,6 +595,7 @@ function toast(message) {
 }
 
 function render() {
+  syncDayChange();
   state.formDirty = false;
   app.innerHTML = state.mode === 'child' ? renderChild() : state.mode === 'gate' ? renderParentGate() : renderParent();
   if (state.mode === 'parent') mountCharts();

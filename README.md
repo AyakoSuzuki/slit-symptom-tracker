@@ -1,4 +1,4 @@
-# SLIT Symptom Tracker v0.4.6
+# SLIT Symptom Tracker v0.4.7
 
 舌下免疫療法の服用後に、主観的な局所症状の強さと時間経過を記録する、iPhone向けの静的PWAです。
 

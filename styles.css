@@ -51,7 +51,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .scale-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 14px 0 20px; }
 .scale-button { min-height: 92px; border: 2px solid transparent; background: rgba(255,255,255,.86); border-radius: 20px; padding: 8px; display: grid; place-items: center; gap: 4px; font-weight: 800; }
-.scale-button:hover { border-color: #799b91; }
+/* タッチ端末では、一度タップしたボタンに hover が残り続け、選択されているように見えてしまう */
+@media (hover: hover) { .scale-button:hover { border-color: #799b91; } }
 .scale-button[aria-checked="true"] { border-color: var(--mint-strong); background: #fff; box-shadow: 0 0 0 3px rgba(45,102,88,.13); }
 .scale-button svg { width: 52px; height: 38px; }
 .scale-number { font-size: 1.35rem; line-height: 1; }
@@ -71,6 +72,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .undo-bar button { border: 1px solid white; background: transparent; color: white; border-radius: 10px; padding: 6px 12px; }
 .error-card { border: 2px solid #7b3041; background: #fff8f9; }
 .parent-gate { width: min(100%, 520px); margin: 7vh auto 0; }
+.parent-gate form { display: grid; gap: 18px; }
 .parent-shell h1 { font-size: clamp(1.5rem, 5vw, 2rem); }
 .tabs { display: flex; overflow-x: auto; gap: 8px; padding: 3px 3px 12px; scrollbar-width: thin; }
 .tab { flex: 0 0 auto; border: 1px solid var(--border); background: white; border-radius: 999px; padding: 9px 15px; }

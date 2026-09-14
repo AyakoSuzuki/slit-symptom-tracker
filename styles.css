@@ -138,6 +138,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .daily-choice input:focus-visible + span { outline: 3px solid var(--focus); outline-offset: 2px; }
 .daily-choice.wide span { min-width: 0; place-items: center start; text-align: left; font-weight: 650; }
 .daily-medication { display: grid; gap: 8px; }
+.slit-choices { display: flex; gap: 6px; }
+.slit-choices .daily-choice { flex: 1; }
+.slit-choices span { min-width: 0; padding: 0 6px; font-size: .92rem; font-weight: 700; }
 .daily-dose { background: var(--sky); border-radius: 12px; padding: 10px 13px; }
 .daily-complete { color: var(--mint-strong); font-weight: 700; }
 

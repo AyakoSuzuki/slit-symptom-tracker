@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_SETTINGS, addSymptomRecord, createSession } from '../src/model.js';
-import { SUMMARY_COLUMNS, TIME_SERIES_COLUMNS, backupJson, summaryCsv, timeSeriesCsv, validateBackup } from '../src/export.js';
+import {
+  DAILY_COLUMNS, SUMMARY_COLUMNS, TIME_SERIES_COLUMNS, backupJson, dailyCsv, summaryCsv, timeSeriesCsv, validateBackup
+} from '../src/export.js';
 
 const settings = {
   ...DEFAULT_SETTINGS, medicationName: '薬,名称', medicationDose: '1',
@@ -44,6 +46,39 @@ test('0の記録は0、症状の記録なしは空欄で書き出す（推定値
   // 0を記録した回: 実測値なので0と書き出す
   assert.equal(rows[2].split(',')[outcomeIndex], 'noSymptomReported');
   assert.equal(rows[2].split(',')[maxIndex], '0');
+});
+
+test('日次CSVの列名と値', () => {
+  const day = '2026-09-14';
+  const records = [{
+    localDate: day, sneezing: 1, rhinorrhoea: 2, congestion: 0, nasalItch: 1, ocularItch: 0, wateryEyes: 2,
+    medicationClasses: [1, 2], note: '引用"と,カンマ', entryTimestamp: '2026-09-14T21:00:00.000+01:00',
+    isRetrospective: false
+  }];
+  const text = dailyCsv(records, []);
+  assert.ok(text.startsWith(`﻿${DAILY_COLUMNS.join(',')}\r\n`));
+
+  // note にカンマが入るため、それより前の列だけを単純分割で確認する
+  const values = text.split('\r\n')[1].split(',');
+  assert.equal(values[DAILY_COLUMNS.indexOf('date')], day);
+  assert.equal(values[DAILY_COLUMNS.indexOf('slit_status')], '');
+  assert.equal(values[DAILY_COLUMNS.indexOf('sneezing')], '1');
+  assert.equal(values[DAILY_COLUMNS.indexOf('dss')], '1');
+  assert.equal(values[DAILY_COLUMNS.indexOf('tnss')], '4');
+  assert.equal(values[DAILY_COLUMNS.indexOf('medication_classes')], '1|2');
+  assert.equal(values[DAILY_COLUMNS.indexOf('dms')], '2');
+  assert.equal(values[DAILY_COLUMNS.indexOf('csms')], '3');
+  assert.match(text, /"引用""と,カンマ"/);
+
+  // 服用記録のある日は taken になる
+  const withSession = dailyCsv(records, [{ localDate: day }]).split('\r\n')[1].split(',');
+  assert.equal(withSession[DAILY_COLUMNS.indexOf('slit_status')], 'taken');
+
+  // 症状が揃っていない日は dss と csms を空欄にする
+  const partial = dailyCsv([{ localDate: day, sneezing: 1, medicationClasses: [0] }], []).split('\r\n')[1].split(',');
+  assert.equal(partial[DAILY_COLUMNS.indexOf('dss')], '');
+  assert.equal(partial[DAILY_COLUMNS.indexOf('csms')], '');
+  assert.equal(partial[DAILY_COLUMNS.indexOf('dms')], '0');
 });
 
 test('backupを往復し、旧版を受け入れて未知versionを拒否する', () => {

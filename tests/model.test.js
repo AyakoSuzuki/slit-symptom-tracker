@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deriveMetrics, deriveOutcome, doseTimerPhase, formatJapaneseMinutes,
-  dailyScores, doseStatusForDay, isValidTimerMinutes, recentDays, reopenSession, selectedSeverityForDay, shiftDay
+  dailyScores, doseStatusForDay, isValidTimerMinutes, medicationClassesOf, recentDays, reopenSession,
+  selectedSeverityForDay, shiftDay
 } from '../src/model.js';
 
 const settings = {
@@ -226,6 +227,29 @@ test('日次スコアは6項目そろった日だけ算出する', () => {
 
   assert.equal(dailyScores({}).dss, undefined);
   assert.equal(dailyScores(undefined).tnss, undefined);
+});
+
+test('その日に使った薬は複数記録し、dMSは最上位を採る', () => {
+  const symptoms = { sneezing: 1, rhinorrhoea: 2, congestion: 0, nasalItch: 1, ocularItch: 0, wateryEyes: 2 };
+  assert.deepEqual(medicationClassesOf({ medicationClasses: [1, 2] }), [1, 2]);
+  assert.equal(dailyScores({ ...symptoms, medicationClasses: [1, 2] }).dms, 2);
+  assert.equal(dailyScores({ ...symptoms, medicationClasses: [1, 2] }).csms, 3); // dSS 1 + dMS 2
+  assert.equal(dailyScores({ ...symptoms, medicationClasses: [0] }).dms, 0);
+
+  // 旧形式（medicationClass に1つだけ）の記録も読める
+  assert.deepEqual(medicationClassesOf({ medicationClass: 3 }), [3]);
+  assert.equal(dailyScores({ ...symptoms, medicationClass: 3 }).dms, 3);
+
+  assert.deepEqual(medicationClassesOf({}), []);
+  assert.equal(dailyScores(symptoms).dms, undefined);
+  assert.equal(dailyScores(symptoms).csms, undefined);
+});
+
+test('服用の有無は「飲んだ」も記録できる', () => {
+  const day = '2026-09-14';
+  assert.equal(doseStatusForDay({ slitStatus: 'taken' }, [], day), 'taken');
+  assert.equal(doseStatusForDay({ slitStatus: 'missed' }, [], day), 'missed');
+  assert.equal(doseStatusForDay({}, [], day), undefined);
 });
 
 test('服用の有無はセッションを正本にする', () => {

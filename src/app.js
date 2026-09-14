@@ -4,13 +4,13 @@ import {
   doseTimerPhase, isValidTimerMinutes, localIso, minutesBetween, reopenSession,
   selectedSeverityForDay, shouldAutoClose, updateSymptomRecord, validateSettings,
   DAILY_SEVERITIES, DAILY_SYMPTOM_KEYS, MEDICATION_CLASSES, createDailyRecord, dailyScores,
-  doseStatusForDay, recentDays, shiftDay
+  doseStatusForDay, medicationClassesOf, recentDays, shiftDay
 } from './model.js';
 import {
   deleteAllData, deleteDailyRecord, deleteSession, getDailyRecords, getMeta, getSessions,
   getSettings, putMeta, putDailyRecord, putSession, putSettings, replaceAllData
 } from './db.js';
-import { backupJson, summaryCsv, timeSeriesCsv, validateBackup } from './export.js';
+import { backupJson, dailyCsv, summaryCsv, timeSeriesCsv, validateBackup } from './export.js';
 import { comparisonChart, lineChart } from './charts.js';
 
 const app = document.querySelector('#app');
@@ -500,6 +500,7 @@ function renderDaily() {
   const draft = state.dailyDraft?.day === day ? state.dailyDraft.values : null;
   const values = draft || stored || {};
   const scores = dailyScores(values);
+  const selectedClasses = medicationClassesOf(values);
   const session = state.sessions.find((item) => item.localDate === day);
   const days = recentDays(today, 14);
   const filled = days.filter((item) => state.dailyRecords.some((record) => record.localDate === item)).length;
@@ -537,22 +538,21 @@ function renderDaily() {
           </div></div>`).join('')}
       </div>
 
-      <fieldset class="field full"><legend>その日に使った薬（いちばん強いもの）</legend>
+      <fieldset class="field full"><legend>その日に使った薬（あてはまるものすべて）</legend>
         <div class="daily-medication">${MEDICATION_CLASSES.map((value) => `
-          <label class="daily-choice wide"><input type="radio" name="medicationClass" value="${value}" ${values.medicationClass === value ? 'checked' : ''}>
+          <label class="daily-choice wide"><input type="checkbox" name="medicationClasses" value="${value}" ${selectedClasses.includes(value) ? 'checked' : ''}>
             <span>${esc(medicationLabels[value])}</span></label>`).join('')}
         </div></fieldset>
 
       ${session
         ? `<p class="daily-dose">舌下錠: 服用の記録があります（${esc(displayTime(session.doseTimestamp))}）</p>`
-        : `<label class="check"><input type="checkbox" name="slitMissed" ${values.slitStatus === 'missed' ? 'checked' : ''}><span>この日は舌下錠を飲まなかった</span></label>
-           <p class="privacy">チェックしないときは「記録なし」として扱い、飲み忘れとは区別します。</p>`}
+        : `<fieldset class="field full"><legend>舌下錠</legend>
+            <div class="slit-choices">${[['', '記録なし'], ['taken', '飲んだ'], ['missed', '飲まなかった']].map(([value, label]) => `
+              <label class="daily-choice"><input type="radio" name="slitStatus" value="${value}" ${(values.slitStatus || '') === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}
+            </div></fieldset>`}
 
-      <details class="extra"><summary>詳しく記録する（任意）</summary>
-        <label class="field"><span>その日のつらさ全体（0〜100）</span>
-          <input type="number" name="vasGlobal" inputmode="numeric" min="0" max="100" step="1" value="${values.vasGlobal === undefined ? '' : esc(values.vasGlobal)}"></label>
-        <label class="field"><span>使った薬の名前</span><input name="medicationsDetail" value="${esc(values.medicationsDetail || '')}"></label>
-        <label class="field"><span>メモ</span><textarea name="note">${esc(values.note || '')}</textarea></label>
+      <details class="extra"><summary>メモ（任意）</summary>
+        <label class="field"><span class="visually-hidden">メモ</span><textarea name="note" rows="3">${esc(values.note || '')}</textarea></label>
       </details>
 
       ${scores.complete ? '<p class="daily-complete">6つの症状と薬の記録がそろっています。</p>' : ''}
@@ -580,9 +580,11 @@ function copyPreviousDay() {
   const previous = state.dailyRecords.find((record) => record.localDate === shiftDay(day, -1));
   if (!previous) { toast('前日の記録がありません。'); return; }
   const values = {};
-  for (const key of [...DAILY_SYMPTOM_KEYS, 'medicationClass', 'medicationsDetail']) {
+  for (const key of DAILY_SYMPTOM_KEYS) {
     if (previous[key] !== undefined) values[key] = previous[key];
   }
+  const classes = medicationClassesOf(previous);
+  if (classes.length) values.medicationClasses = classes;
   state.dailyDraft = { day, values };
   render();
   toast('前日の値を入れました。確認して保存してください。');
@@ -597,17 +599,13 @@ async function saveDaily(form) {
     const raw = data.get(key);
     record[key] = raw === null || raw === '' ? undefined : Number(raw);
   }
-  const medication = data.get('medicationClass');
-  record.medicationClass = medication === null || medication === '' ? undefined : Number(medication);
-  const vas = String(data.get('vasGlobal') || '').trim();
-  if (vas !== '' && !(Number.isInteger(Number(vas)) && Number(vas) >= 0 && Number(vas) <= 100)) {
-    toast('つらさ全体は0〜100の整数で入力してください。');
-    return;
-  }
-  record.vasGlobal = vas === '' ? undefined : Number(vas);
-  record.medicationsDetail = String(data.get('medicationsDetail') || '').trim() || undefined;
+  const classes = data.getAll('medicationClasses').map(Number).filter((value) => MEDICATION_CLASSES.includes(value));
+  record.medicationClasses = classes.length ? [...classes].sort((a, b) => a - b) : undefined;
+  // 旧形式（1つだけを medicationClass に持つ記録）は、保存のたびに新形式へ寄せる
+  delete record.medicationClass;
   record.note = String(data.get('note') || '').trim() || undefined;
-  record.slitStatus = data.has('slitMissed') ? 'missed' : undefined;
+  const slit = String(data.get('slitStatus') || '');
+  record.slitStatus = slit === 'taken' || slit === 'missed' ? slit : undefined;
   record.updatedAt = localIso();
   // 未入力の項目はキーごと消す。0と未入力を混同しないため
   for (const [key, value] of Object.entries(record)) if (value === undefined) delete record[key];
@@ -671,8 +669,9 @@ function renderData() {
     <div class="button-row"><button class="primary small" type="button" data-action="export-backup">記録をバックアップ</button></div>
     <details class="extra"><summary>CSVで書き出す</summary>
       <p class="privacy">バックアップとは別の形式です。ExcelやNumbersで見るためのもので、このファイルから記録を戻すことはできません。</p>
-      <div class="button-row"><button class="secondary" type="button" data-action="export-summary">記録の一覧表（CSV）</button>
-        <button class="secondary" type="button" data-action="export-series">詳しい経過（CSV）</button></div></details>
+      <div class="button-row"><button class="secondary" type="button" data-action="export-summary">服用ごとの一覧表（CSV）</button>
+        <button class="secondary" type="button" data-action="export-series">服用後の詳しい経過（CSV）</button>
+        ${state.settings.dailyDiaryEnabled ? '<button class="secondary" type="button" data-action="export-daily">日々の記録（CSV）</button>' : ''}</div></details>
     <hr><h3>バックアップから記録を戻す</h3>
     <p class="privacy">読み込むと、<strong>この端末にある記録と設定はすべて置き換わります</strong>。この端末にも残しておきたい記録がある場合は、先に上のバックアップを保存してください。</p>
     <label class="field"><span>保存してあるバックアップファイル</span><input type="file" accept="application/json,.json" data-action="import-file"></label>
@@ -845,6 +844,7 @@ app.addEventListener('click', async (event) => {
   if (action === 'delete-record') { await removeRecord(button.dataset.sessionId, button.dataset.recordId); return; }
   if (action === 'export-summary') { await exportFile('slit-summary.csv', summaryCsv(state.sessions), 'text/csv;charset=utf-8'); return; }
   if (action === 'export-series') { await exportFile('slit-time-series.csv', timeSeriesCsv(state.sessions), 'text/csv;charset=utf-8'); return; }
+  if (action === 'export-daily') { await exportFile('slit-daily.csv', dailyCsv(state.dailyRecords, state.sessions), 'text/csv;charset=utf-8'); return; }
   if (action === 'export-backup') { await exportBackup(); return; }
   if (action === 'confirm-import') { await importConfirmed(); return; }
   if (action === 'request-persist') { await requestPersistence(); return; }
@@ -858,6 +858,15 @@ app.addEventListener('click', async (event) => {
 
 app.addEventListener('change', async (event) => {
   const target = event.target;
+  // 「使用なし」と他の薬は同時に選べない
+  if (target.name === 'medicationClasses' && target.checked) {
+    const boxes = [...target.form.querySelectorAll('input[name="medicationClasses"]')];
+    for (const box of boxes) {
+      if (box === target) continue;
+      if (target.value === '0' || box.value === '0') box.checked = false;
+    }
+    return;
+  }
   if (target.dataset.action === 'period') { state.period = Number(target.value); render(); return; }
   if (target.dataset.action === 'daily-date') { setDailyDate(target.value); return; }
   if (target.dataset.action === 'import-file') await readImportFile(target.files?.[0]);

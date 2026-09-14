@@ -1,4 +1,7 @@
-import { APP_VERSION, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, deriveMetrics, minutesBetween } from './model.js';
+import {
+  APP_VERSION, DAILY_SYMPTOM_KEYS, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, dailyScores,
+  deriveMetrics, doseStatusForDay, medicationClassesOf, minutesBetween
+} from './model.js';
 
 export const SUMMARY_COLUMNS = [
   'session_id', 'local_date', 'dose_time', 'timezone_offset_minutes', 'medication_name', 'dose',
@@ -49,6 +52,34 @@ export function timeSeriesCsv(sessions) {
     minutesBetween(record.timestamp, session.doseTimestamp), record.symptomTypeCode, record.severity
   ]));
   return csv([TIME_SERIES_COLUMNS, ...rows]);
+}
+
+// 日次記録の生データ。医師に渡す前提なので列名も値も英語コードにする。
+export const DAILY_COLUMNS = [
+  'date', 'slit_status', 'sneezing', 'rhinorrhoea', 'congestion', 'nasal_itch', 'ocular_itch',
+  'watery_eyes', 'dss', 'tnss', 'medication_classes', 'dms', 'csms', 'vas_global',
+  'medications_detail', 'note', 'entry_timestamp', 'is_retrospective'
+];
+
+export function dailyCsv(records, sessions = []) {
+  const round = (value) => (value === undefined ? undefined : Number(value.toFixed(3)));
+  const rows = [...records]
+    .sort((a, b) => (a.localDate < b.localDate ? -1 : 1))
+    .map((record) => {
+      const scores = dailyScores(record);
+      const classes = medicationClassesOf(record);
+      return [
+        record.localDate,
+        doseStatusForDay(record, sessions, record.localDate),
+        ...DAILY_SYMPTOM_KEYS.map((key) => record[key]),
+        round(scores.dss), scores.tnss,
+        classes.length ? classes.join('|') : undefined,
+        scores.dms, round(scores.csms),
+        record.vasGlobal, record.medicationsDetail, record.note,
+        record.entryTimestamp, record.isRetrospective ? 1 : 0
+      ];
+    });
+  return csv([DAILY_COLUMNS, ...rows]);
 }
 
 export function backupJson(sessions, settings, dailyRecords = [], exportedAt = new Date().toISOString()) {

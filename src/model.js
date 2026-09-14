@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.5.1';
 export const SCHEMA_VERSION = 2;
 // 取り込みを受け付けるバックアップの版。v1 には日次記録が無いので空で補う。
 export const SUPPORTED_SCHEMA_VERSIONS = [1, 2];
@@ -254,6 +254,15 @@ function validDaily(value) {
   return DAILY_SEVERITIES.includes(value);
 }
 
+// その日に使った薬は複数記録する。dMS はそのうち最上位のものを採る（元仕様 §3.2）。
+// 旧形式（medicationClass に1つだけ）の記録も読めるようにしておく。
+export function medicationClassesOf(record) {
+  if (Array.isArray(record?.medicationClasses)) {
+    return record.medicationClasses.filter((value) => MEDICATION_CLASSES.includes(value));
+  }
+  return MEDICATION_CLASSES.includes(record?.medicationClass) ? [record.medicationClass] : [];
+}
+
 // 6項目すべてが揃っている日だけ dSS を出す。部分入力の平均を混ぜると、
 // 他の日と比較できない値ができてしまう。
 export function dailyScores(record) {
@@ -262,7 +271,8 @@ export function dailyScores(record) {
   const dss = symptoms.every(validDaily)
     ? symptoms.reduce((sum, value) => sum + value, 0) / DAILY_SYMPTOM_KEYS.length
     : undefined;
-  const dms = MEDICATION_CLASSES.includes(record?.medicationClass) ? record.medicationClass : undefined;
+  const classes = medicationClassesOf(record);
+  const dms = classes.length ? Math.max(...classes) : undefined;
   const tnss = nasal.every(validDaily) ? nasal.reduce((sum, value) => sum + value, 0) : undefined;
   return {
     dss,
@@ -277,7 +287,7 @@ export function dailyScores(record) {
 // 記録が何も無い日を「飲み忘れ」と同一視しない。
 export function doseStatusForDay(record, sessions, day) {
   if (sessions.some((session) => session.localDate === day)) return 'taken';
-  return record?.slitStatus === 'missed' ? 'missed' : undefined;
+  return record?.slitStatus === 'missed' || record?.slitStatus === 'taken' ? record.slitStatus : undefined;
 }
 
 export function median(values) {

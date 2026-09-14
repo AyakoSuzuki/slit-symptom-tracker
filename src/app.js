@@ -34,7 +34,9 @@ const state = {
   storageStatus: 'checking',
   lastBackupAt: null,
   importPreview: null,
-  updateWaiting: false
+  updateWaiting: false,
+  swRegistration: null,
+  reloadingForUpdate: false
 };
 
 const outcomeLabels = {
@@ -326,6 +328,8 @@ function renderParent() {
     <h1 class="brand">SLIT Symptom Tracker</h1></div><button class="secondary" type="button" data-action="back-child">こども画面へ</button></header>
     <nav class="tabs" aria-label="保護者画面">${tabs.map(([id, label]) => `<button class="tab" type="button" role="tab"
       aria-selected="${state.parentTab === id}" data-action="parent-tab" data-tab="${id}">${label}</button>`).join('')}</nav>
+    ${state.updateWaiting ? `<div class="notice update-notice"><span>新しい版が用意できています。記録はそのまま残ります。</span>
+      <button class="secondary" type="button" data-action="apply-update">更新して再起動</button></div>` : ''}
     ${parentPanel()}</div>`;
 }
 
@@ -659,6 +663,7 @@ app.addEventListener('click', async (event) => {
   if (action === 'export-backup') { await exportBackup(); return; }
   if (action === 'confirm-import') { await importConfirmed(); return; }
   if (action === 'request-persist') { await requestPersistence(); return; }
+  if (action === 'apply-update') { applyUpdate(); return; }
 });
 
 app.addEventListener('change', async (event) => {
@@ -983,13 +988,37 @@ async function registerServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   try {
     const registration = await navigator.serviceWorker.register('./sw.js');
-    if (registration.waiting) state.updateWaiting = true;
+    state.swRegistration = registration;
+    // 新しい版が待機したままにならないよう、起動時に更新の有無を確認する
+    registration.update().catch(() => {});
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (state.reloadingForUpdate) return;
+      state.reloadingForUpdate = true;
+      location.reload();
+    });
+    const noteWaiting = () => {
+      // 初回インストールでも一瞬 waiting を通るため、既に前の版が動いている場合だけ更新とみなす。
+      // controller が無いページ（初回読み込み）で通知を出すと、新規なのに更新扱いになってしまう。
+      if (!registration.waiting || !navigator.serviceWorker.controller || state.updateWaiting) return;
+      state.updateWaiting = true;
+      render();
+    };
+    noteWaiting();
     registration.addEventListener('updatefound', () => {
-      registration.installing?.addEventListener('statechange', () => {
-        if (registration.waiting) { state.updateWaiting = true; if (state.mode === 'parent') toast('更新は次回起動時に適用できます。'); }
-      });
+      registration.installing?.addEventListener('statechange', noteWaiting);
     });
   } catch (error) { console.warn('Service Worker registration failed', error); }
+}
+
+// 待機中の新しい版へ、利用者の操作で切り替える。押されるまで古い版のまま動かす。
+function applyUpdate() {
+  const waiting = state.swRegistration?.waiting;
+  if (!waiting) {
+    toast('更新の準備ができていません。アプリを閉じて開き直してください。');
+    return;
+  }
+  toast('更新しています…');
+  waiting.postMessage({ type: 'SKIP_WAITING' });
 }
 
 async function boot() {
@@ -1007,6 +1036,8 @@ async function boot() {
 
 document.addEventListener('visibilitychange', async () => {
   if (document.hidden) return;
+  // 戻ってきたときにも新しい版の有無を確認する
+  state.swRegistration?.update().catch(() => {});
   await refreshSessions();
   if (state.mode === 'parent' && state.formDirty) return;
   render();

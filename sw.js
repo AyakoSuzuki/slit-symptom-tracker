@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'slit-symptom-tracker-app-';
-const CACHE_NAME = `${CACHE_PREFIX}0.4.5-20260911`;
+const CACHE_NAME = `${CACHE_PREFIX}0.4.6-20260914`;
 const APP_SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
   './src/app.js', './src/model.js', './src/db.js', './src/export.js', './src/charts.js',
@@ -14,6 +14,12 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(caches.keys().then((keys) => Promise.all(keys
     .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
     .map((key) => caches.delete(key)))));
+});
+
+// 利用者が Parent Mode で「更新して再起動」を押したときだけ、待機中の版に切り替える。
+// 無条件の skipWaiting は行わない（§19）。
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {

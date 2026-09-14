@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deriveMetrics, deriveOutcome, doseTimerPhase, formatJapaneseMinutes,
-  dailyScores, doseStatusForDay, isValidTimerMinutes, reopenSession, selectedSeverityForDay
+  dailyScores, doseStatusForDay, isValidTimerMinutes, recentDays, reopenSession, selectedSeverityForDay, shiftDay
 } from '../src/model.js';
 
 const settings = {
@@ -237,6 +237,22 @@ test('服用の有無はセッションを正本にする', () => {
   assert.equal(doseStatusForDay({ slitStatus: 'missed' }, [], day), 'missed');
   // 何も記録がない日を飲み忘れと同一視しない
   assert.equal(doseStatusForDay(undefined, [], day), undefined);
+});
+
+test('日付の移動は月末・年末・夏時間をまたいでも正しい', () => {
+  assert.equal(shiftDay('2026-09-14', -1), '2026-09-13');
+  assert.equal(shiftDay('2026-09-14', 1), '2026-09-15');
+  assert.equal(shiftDay('2026-09-01', -1), '2026-08-31');
+  assert.equal(shiftDay('2026-12-31', 1), '2027-01-01');
+  assert.equal(shiftDay('2028-02-28', 1), '2028-02-29');
+  // 英国の夏時間の切り替わり日をまたいでもずれない
+  assert.equal(shiftDay('2026-10-25', -1), '2026-10-24');
+  assert.equal(shiftDay('2026-03-29', -1), '2026-03-28');
+
+  const days = recentDays('2026-09-14', 14);
+  assert.equal(days.length, 14);
+  assert.equal(days[13], '2026-09-14');
+  assert.equal(days[0], '2026-09-01');
 });
 
 test('明示的な分表記を使う', () => {

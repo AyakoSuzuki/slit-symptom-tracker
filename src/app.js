@@ -2,11 +2,13 @@ import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deleteSymptomRecord, deriveMetrics, formatJapaneseMinutes,
   doseTimerPhase, isValidTimerMinutes, localIso, minutesBetween, reopenSession,
-  selectedSeverityForDay, shouldAutoClose, updateSymptomRecord, validateSettings
+  selectedSeverityForDay, shouldAutoClose, updateSymptomRecord, validateSettings,
+  DAILY_SEVERITIES, DAILY_SYMPTOM_KEYS, MEDICATION_CLASSES, createDailyRecord, dailyScores,
+  doseStatusForDay, recentDays, shiftDay
 } from './model.js';
 import {
-  deleteAllData, deleteSession, getDailyRecords, getMeta, getSessions, getSettings, putMeta,
-  putDailyRecord, putSession, putSettings, replaceAllData
+  deleteAllData, deleteDailyRecord, deleteSession, getDailyRecords, getMeta, getSessions,
+  getSettings, putMeta, putDailyRecord, putSession, putSettings, replaceAllData
 } from './db.js';
 import { backupJson, summaryCsv, timeSeriesCsv, validateBackup } from './export.js';
 import { comparisonChart, lineChart } from './charts.js';
@@ -20,6 +22,8 @@ const state = {
   settings: { ...DEFAULT_SETTINGS },
   sessions: [],
   dailyRecords: [],
+  dailyDate: null,
+  dailyDraft: null,
   pendingWorry: undefined,
   worrySkipped: false,
   undo: null,
@@ -333,7 +337,9 @@ function renderParentGate() {
 
 function renderParent() {
   const tabs = [
-    ['dashboard', '概要'], ['history', '履歴'], ['settings', '設定'], ['data', 'データ'], ['safety', '安全について']
+    ['dashboard', '概要'],
+    ...(state.settings.dailyDiaryEnabled ? [['daily', '日々の記録']] : []),
+    ['history', '服用の記録'], ['settings', '設定'], ['data', 'データ'], ['safety', '安全について']
   ];
   return `<div class="shell parent-shell"><header class="topbar"><div><p class="eyebrow">Parent Mode</p>
     <h1 class="brand">SLIT Symptom Tracker</h1></div><button class="secondary" type="button" data-action="back-child">こども画面へ</button></header>
@@ -345,6 +351,9 @@ function renderParent() {
 }
 
 function parentPanel() {
+  if (state.parentTab === 'daily') {
+    return state.settings.dailyDiaryEnabled ? renderDaily() : renderDashboard();
+  }
   if (state.parentTab === 'history') return renderHistory();
   if (state.parentTab === 'settings') return renderSettings();
   if (state.parentTab === 'data') return renderData();
@@ -458,6 +467,169 @@ function conditionChecks(session) {
     ${(session.conditionCodes || []).includes(value) ? 'checked' : ''}><span>${label}</span></label>`).join('');
 }
 
+const dailySymptomLabels = {
+  sneezing: 'くしゃみ',
+  rhinorrhoea: '鼻水',
+  congestion: '鼻づまり',
+  nasalItch: '鼻のかゆみ',
+  ocularItch: '目のかゆみ・充血',
+  wateryEyes: '涙目'
+};
+
+// 判定基準がぶれると1年分のデータが比較できなくなるため、入力欄の上に常時表示する
+const dailyCriteria = [
+  [0, 'なし', '症状を自覚しない'],
+  [1, '軽度', '症状はあるが気にならず、日常生活に支障がない'],
+  [2, '中等度', '症状が気になるが、日常生活は何とかこなせる'],
+  [3, '重度', '症状が耐えがたく、日常生活や睡眠に明らかな支障がある']
+];
+
+const medicationLabels = ['使用なし', '抗ヒスタミン薬（飲み薬・点鼻）', '点鼻ステロイド', '飲み薬のステロイド'];
+
+function dailyDayLabel(day, today) {
+  const label = `${Number(day.slice(5, 7))}月${Number(day.slice(8, 10))}日`;
+  if (day === today) return `${label}（今日）`;
+  if (day === shiftDay(today, -1)) return `${label}（昨日）`;
+  return label;
+}
+
+function renderDaily() {
+  const today = localDateToday();
+  const day = state.dailyDate || today;
+  const stored = state.dailyRecords.find((record) => record.localDate === day);
+  const draft = state.dailyDraft?.day === day ? state.dailyDraft.values : null;
+  const values = draft || stored || {};
+  const scores = dailyScores(values);
+  const session = state.sessions.find((item) => item.localDate === day);
+  const days = recentDays(today, 14);
+  const filled = days.filter((item) => state.dailyRecords.some((record) => record.localDate === item)).length;
+
+  return `<section><div class="card">
+    <h2 class="panel-title">日々の記録</h2>
+    <p class="privacy">鼻と目の症状を1日1回記録します。服用後ののどの記録（服用の記録）とは別のものです。</p>
+
+    <div class="daily-nav">
+      <button class="secondary" type="button" data-action="daily-prev" aria-label="前の日">‹</button>
+      <label class="field"><span class="visually-hidden">日付</span>
+        <input type="date" data-action="daily-date" value="${esc(day)}" max="${esc(today)}"></label>
+      <button class="secondary" type="button" data-action="daily-next" ${day >= today ? 'disabled' : ''} aria-label="次の日">›</button>
+    </div>
+    <p class="daily-day">${esc(dailyDayLabel(day, today))}</p>
+
+    <div class="daily-strip" role="group" aria-label="直近14日の入力状況">${days.map((item) => {
+      const has = state.dailyRecords.some((record) => record.localDate === item);
+      return `<button class="strip-day${has ? ' filled' : ''}${item === day ? ' current' : ''}" type="button"
+        data-action="daily-pick" data-day="${esc(item)}"
+        aria-label="${esc(item)} ${has ? '記録あり' : '記録なし'}">${Number(item.slice(8, 10))}</button>`;
+    }).join('')}</div>
+    <p class="privacy">直近14日のうち ${filled}日 入力しました。未入力の日を0で埋めることはしません。</p>
+
+    <form data-form="daily" data-day="${esc(day)}">
+      <table class="criteria"><caption>0〜3のめやす</caption><tbody>
+        ${dailyCriteria.map(([value, name, note]) => `<tr><th scope="row">${value}</th><td>${name}</td><td>${note}</td></tr>`).join('')}
+      </tbody></table>
+
+      <div class="daily-grid">${DAILY_SYMPTOM_KEYS.map((key) => `
+        <div class="daily-row"><span class="daily-label" id="daily-label-${key}">${esc(dailySymptomLabels[key])}</span>
+          <div class="daily-choices" role="group" aria-labelledby="daily-label-${key}">${DAILY_SEVERITIES.map((value) => `
+            <label class="daily-choice"><input type="radio" name="${key}" value="${value}" ${values[key] === value ? 'checked' : ''}
+              aria-label="${esc(dailySymptomLabels[key])} ${value} ${esc(dailyCriteria[value][1])}"><span>${value}</span></label>`).join('')}
+          </div></div>`).join('')}
+      </div>
+
+      <fieldset class="field full"><legend>その日に使った薬（いちばん強いもの）</legend>
+        <div class="daily-medication">${MEDICATION_CLASSES.map((value) => `
+          <label class="daily-choice wide"><input type="radio" name="medicationClass" value="${value}" ${values.medicationClass === value ? 'checked' : ''}>
+            <span>${esc(medicationLabels[value])}</span></label>`).join('')}
+        </div></fieldset>
+
+      ${session
+        ? `<p class="daily-dose">舌下錠: 服用の記録があります（${esc(displayTime(session.doseTimestamp))}）</p>`
+        : `<label class="check"><input type="checkbox" name="slitMissed" ${values.slitStatus === 'missed' ? 'checked' : ''}><span>この日は舌下錠を飲まなかった</span></label>
+           <p class="privacy">チェックしないときは「記録なし」として扱い、飲み忘れとは区別します。</p>`}
+
+      <details class="extra"><summary>詳しく記録する（任意）</summary>
+        <label class="field"><span>その日のつらさ全体（0〜100）</span>
+          <input type="number" name="vasGlobal" inputmode="numeric" min="0" max="100" step="1" value="${values.vasGlobal === undefined ? '' : esc(values.vasGlobal)}"></label>
+        <label class="field"><span>使った薬の名前</span><input name="medicationsDetail" value="${esc(values.medicationsDetail || '')}"></label>
+        <label class="field"><span>メモ</span><textarea name="note">${esc(values.note || '')}</textarea></label>
+      </details>
+
+      ${scores.complete ? '<p class="daily-complete">6つの症状と薬の記録がそろっています。</p>' : ''}
+      ${stored?.isRetrospective ? '<p class="privacy">この記録は後日入力されたものとして保存されています。</p>' : ''}
+
+      <div class="button-row form-submit">
+        <button class="primary small" type="submit">保存</button>
+        <button class="secondary" type="button" data-action="daily-copy">前日と同じ</button>
+        ${stored ? `<button class="secondary danger" type="button" data-action="daily-delete" data-day="${esc(day)}">この日の記録を削除</button>` : ''}
+      </div>
+    </form>
+  </div></section>`;
+}
+
+function setDailyDate(day) {
+  if (!day || day > localDateToday()) return;
+  state.dailyDate = day;
+  state.dailyDraft = null;
+  render();
+}
+
+// 前日の値は自動では入れない。惰性の入力を避けるため、押したときだけ写す。
+function copyPreviousDay() {
+  const day = state.dailyDate || localDateToday();
+  const previous = state.dailyRecords.find((record) => record.localDate === shiftDay(day, -1));
+  if (!previous) { toast('前日の記録がありません。'); return; }
+  const values = {};
+  for (const key of [...DAILY_SYMPTOM_KEYS, 'medicationClass', 'medicationsDetail']) {
+    if (previous[key] !== undefined) values[key] = previous[key];
+  }
+  state.dailyDraft = { day, values };
+  render();
+  toast('前日の値を入れました。確認して保存してください。');
+}
+
+async function saveDaily(form) {
+  const data = new FormData(form);
+  const day = form.dataset.day;
+  const existing = state.dailyRecords.find((record) => record.localDate === day);
+  const record = { ...(existing || createDailyRecord(day)) };
+  for (const key of DAILY_SYMPTOM_KEYS) {
+    const raw = data.get(key);
+    record[key] = raw === null || raw === '' ? undefined : Number(raw);
+  }
+  const medication = data.get('medicationClass');
+  record.medicationClass = medication === null || medication === '' ? undefined : Number(medication);
+  const vas = String(data.get('vasGlobal') || '').trim();
+  if (vas !== '' && !(Number.isInteger(Number(vas)) && Number(vas) >= 0 && Number(vas) <= 100)) {
+    toast('つらさ全体は0〜100の整数で入力してください。');
+    return;
+  }
+  record.vasGlobal = vas === '' ? undefined : Number(vas);
+  record.medicationsDetail = String(data.get('medicationsDetail') || '').trim() || undefined;
+  record.note = String(data.get('note') || '').trim() || undefined;
+  record.slitStatus = data.has('slitMissed') ? 'missed' : undefined;
+  record.updatedAt = localIso();
+  // 未入力の項目はキーごと消す。0と未入力を混同しないため
+  for (const [key, value] of Object.entries(record)) if (value === undefined) delete record[key];
+
+  if (await saveWithFeedback(() => putDailyRecord(record))) {
+    state.dailyRecords = await getDailyRecords();
+    state.dailyDraft = null;
+    toast('記録を保存しました。');
+    render();
+  }
+}
+
+async function removeDailyRecord(day) {
+  if (!confirm(`${day} の記録を削除しますか？`)) return;
+  if (await saveWithFeedback(() => deleteDailyRecord(day))) {
+    state.dailyRecords = await getDailyRecords();
+    state.dailyDraft = null;
+    toast('削除しました。');
+    render();
+  }
+}
+
 function renderSettings() {
   const s = state.settings;
   return `<section class="card"><h2 class="panel-title">${s.setupComplete ? '設定' : '初回セットアップ'}</h2>
@@ -470,6 +642,7 @@ function renderSettings() {
       <label class="field"><span>緊急連絡先のラベル（任意）</span><input name="emergencyContactLabel" value="${esc(s.emergencyContactLabel)}"></label>
       <label class="field"><span>緊急連絡先の値（任意）</span><input name="emergencyContactValue" value="${esc(s.emergencyContactValue)}"></label>
       <label class="check field full"><input type="checkbox" name="childModeEnabled" ${s.childModeEnabled?'checked':''}><span>子ども画面を使用する</span></label>
+      <label class="check field full"><input type="checkbox" name="dailyDiaryEnabled" ${s.dailyDiaryEnabled?'checked':''}><span>「日々の記録」（鼻・目の症状）を使用する</span></label>
       <label class="check field full"><input type="checkbox" name="askPreDoseWorry" ${s.askPreDoseWorry?'checked':''}><span>服用前の心配度を任意で尋ねる</span></label>
       <label class="check field full"><input type="checkbox" name="showResolutionDurationInChildMode" ${s.showResolutionDurationInChildMode?'checked':''}><span>Child Modeの終了時に所要時間を表示する（既定OFF）</span></label>
       <fieldset class="field full"><legend>服用手順のタイマー（任意）</legend>
@@ -676,11 +849,17 @@ app.addEventListener('click', async (event) => {
   if (action === 'confirm-import') { await importConfirmed(); return; }
   if (action === 'request-persist') { await requestPersistence(); return; }
   if (action === 'apply-update') { applyUpdate(); return; }
+  if (action === 'daily-prev') { setDailyDate(shiftDay(state.dailyDate || localDateToday(), -1)); return; }
+  if (action === 'daily-next') { setDailyDate(shiftDay(state.dailyDate || localDateToday(), 1)); return; }
+  if (action === 'daily-pick') { setDailyDate(button.dataset.day); return; }
+  if (action === 'daily-copy') { copyPreviousDay(); return; }
+  if (action === 'daily-delete') { await removeDailyRecord(button.dataset.day); return; }
 });
 
 app.addEventListener('change', async (event) => {
   const target = event.target;
   if (target.dataset.action === 'period') { state.period = Number(target.value); render(); return; }
+  if (target.dataset.action === 'daily-date') { setDailyDate(target.value); return; }
   if (target.dataset.action === 'import-file') await readImportFile(target.files?.[0]);
 });
 
@@ -713,6 +892,7 @@ app.addEventListener('submit', async (event) => {
   if (kind === 'record-add') await addRecordFromParent(form);
   if (kind === 'record-edit') await saveRecord(form);
   if (kind === 'session-edit') await saveSessionInfo(form);
+  if (kind === 'daily') await saveDaily(form);
   if (kind === 'delete-all') await removeAll(form);
 });
 
@@ -835,6 +1015,7 @@ async function saveSettings(form) {
     parentSymptomLabel: childLabel,
     childSymptomLabel: childLabel,
     childModeEnabled: data.has('childModeEnabled'),
+    dailyDiaryEnabled: data.has('dailyDiaryEnabled'),
     askPreDoseWorry: data.has('askPreDoseWorry'),
     showResolutionDurationInChildMode: data.has('showResolutionDurationInChildMode'),
     doseTimerEnabled,

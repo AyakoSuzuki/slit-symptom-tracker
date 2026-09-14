@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.4.9';
+export const APP_VERSION = '0.5.0';
 export const SCHEMA_VERSION = 2;
 // 取り込みを受け付けるバックアップの版。v1 には日次記録が無いので空で補う。
 export const SUPPORTED_SCHEMA_VERSIONS = [1, 2];
@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   childModeEnabled: true,
   askPreDoseWorry: true,
   showResolutionDurationInChildMode: false,
+  dailyDiaryEnabled: true,
   doseTimerEnabled: false,
   holdMinutes: '',
   waitMinutes: '',
@@ -219,6 +220,18 @@ export function autoCloseSessions(sessions, now = new Date()) {
 // ---- 日次記録（鼻炎・結膜炎の症状コントロール）----
 // 局所反応（DoseSession）とは別物。こちらは有効性の評価に使う1日1件の記録で、
 // 判定基準が変わると1年分が比較できなくなるため、定義を動かさない。
+
+// 'YYYY-MM-DD' を日数で動かす。夏時間の影響を受けないよう UTC で計算する。
+export function shiftDay(day, delta) {
+  const [year, month, date] = day.split('-').map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, date + delta));
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
+}
+
+export function recentDays(day, count) {
+  return Array.from({ length: count }, (_, index) => shiftDay(day, index - (count - 1)));
+}
 
 export const DAILY_NASAL_KEYS = ['sneezing', 'rhinorrhoea', 'congestion', 'nasalItch'];
 export const DAILY_OCULAR_KEYS = ['ocularItch', 'wateryEyes'];

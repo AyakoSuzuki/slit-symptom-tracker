@@ -95,7 +95,9 @@ await evaluate(`document.querySelector('[data-action="adult-gate"]').click()`);
 await wait();
 await evaluate(`document.querySelector('[data-form="parent-gate"] input[name="confirm"]').checked=true; document.querySelector('[data-form="parent-gate"]').requestSubmit()`);
 await wait(500);
-const parent = await evaluate(`({ tabs: document.querySelectorAll('[role="tab"]').length, charts: document.querySelectorAll('.chart-card svg').length, hasSummary: document.body.innerText.includes('記録の概要') })`);
+const parent = await evaluate(`({ tabs: document.querySelectorAll('[role="tab"]').length,
+  tabLabels: [...document.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent.trim()),
+  charts: document.querySelectorAll('.chart-card svg').length, hasSummary: document.body.innerText.includes('記録の概要') })`);
 const parentScreenshot = await command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
 await writeFile(parentScreenshotPath, Buffer.from(parentScreenshot.data, 'base64'));
 await evaluate(`document.querySelector('[data-action="parent-tab"][data-tab="settings"]').click()`);
@@ -115,5 +117,6 @@ console.log(JSON.stringify(result));
 if (!before.hasMedication || before.worryButtons !== 6 || before.worryLabels !== 6 || before.width !== before.scrollWidth ||
     !lastValue.showsLast || lastValue.showsMax || !lastValue.checked || !lastValue.uncheckedOthers ||
     active.severityButtons !== 6 || !active.hasPrompt || !undoStayed || !resolved.resolvedText ||
-    !persisted.persistedText || persisted.severityButtons !== 6 || parent.tabs !== 5 || !parent.hasSummary ||
+    !persisted.persistedText || persisted.severityButtons !== 6 || parent.tabs !== 6 ||
+    !parent.tabLabels.includes('日々の記録') || !parent.tabLabels.includes('服用の記録') || !parent.hasSummary ||
     !settingsUi.oneSymptomField || settingsUi.hasTechnicalCode || dataUi.hasBestEffort || !dataUi.hasBackupLabel || exceptions.length) process.exitCode = 1;

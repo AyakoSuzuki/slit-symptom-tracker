@@ -1,7 +1,7 @@
 import { DEFAULT_SETTINGS } from './model.js';
 
 const DB_NAME = 'slit-symptom-tracker';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise;
 
 function requestPromise(request) {
@@ -22,6 +22,10 @@ export function openDatabase() {
         const sessions = db.createObjectStore('sessions', { keyPath: 'id' });
         sessions.createIndex('localDate', 'localDate');
         sessions.createIndex('doseTimestamp', 'doseTimestamp');
+      }
+      // 日次記録（鼻炎・結膜炎）。1日1件なので localDate を主キーにする
+      if (!db.objectStoreNames.contains('dailyRecords')) {
+        db.createObjectStore('dailyRecords', { keyPath: 'localDate' });
       }
       if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings');
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
@@ -63,6 +67,20 @@ export function deleteSession(id) {
   return transaction(['sessions'], 'readwrite', (tx) => tx.objectStore('sessions').delete(id));
 }
 
+export async function getDailyRecords() {
+  const db = await openDatabase();
+  const values = await requestPromise(db.transaction('dailyRecords').objectStore('dailyRecords').getAll());
+  return values.sort((a, b) => (a.localDate < b.localDate ? 1 : -1));
+}
+
+export function putDailyRecord(record) {
+  return transaction(['dailyRecords'], 'readwrite', (tx) => tx.objectStore('dailyRecords').put(record));
+}
+
+export function deleteDailyRecord(day) {
+  return transaction(['dailyRecords'], 'readwrite', (tx) => tx.objectStore('dailyRecords').delete(day));
+}
+
 export async function getSettings() {
   const db = await openDatabase();
   const value = await requestPromise(db.transaction('settings').objectStore('settings').get('current'));
@@ -82,18 +100,22 @@ export function putMeta(key, value) {
   return transaction(['meta'], 'readwrite', (tx) => tx.objectStore('meta').put(value, key));
 }
 
-export function replaceAllData(sessions, settings) {
-  return transaction(['sessions', 'settings'], 'readwrite', (tx) => {
+export function replaceAllData(sessions, settings, dailyRecords = []) {
+  return transaction(['sessions', 'dailyRecords', 'settings'], 'readwrite', (tx) => {
     const sessionStore = tx.objectStore('sessions');
     sessionStore.clear();
     for (const session of sessions) sessionStore.put(session);
+    const dailyStore = tx.objectStore('dailyRecords');
+    dailyStore.clear();
+    for (const record of dailyRecords) dailyStore.put(record);
     tx.objectStore('settings').put(settings, 'current');
   });
 }
 
 export function deleteAllData() {
-  return transaction(['sessions', 'settings', 'meta'], 'readwrite', (tx) => {
+  return transaction(['sessions', 'dailyRecords', 'settings', 'meta'], 'readwrite', (tx) => {
     tx.objectStore('sessions').clear();
+    tx.objectStore('dailyRecords').clear();
     tx.objectStore('settings').clear();
     tx.objectStore('meta').clear();
   });

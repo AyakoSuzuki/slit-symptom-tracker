@@ -46,9 +46,15 @@ test('0の記録は0、症状の記録なしは空欄で書き出す（推定値
   assert.equal(rows[2].split(',')[maxIndex], '0');
 });
 
-test('version 1 backupを往復し未知versionを拒否する', () => {
-  const json = backupJson([], settings, '2026-08-19T00:00:00.000Z');
+test('backupを往復し、旧版を受け入れて未知versionを拒否する', () => {
+  const json = backupJson([], settings, [{ localDate: '2026-08-19', sneezing: 1 }], '2026-08-19T00:00:00.000Z');
   const value = validateBackup(JSON.parse(json));
-  assert.equal(value.schemaVersion, 1);
-  assert.throws(() => validateBackup({ ...value, schemaVersion: 2 }), /対応していません/);
+  assert.equal(value.schemaVersion, 2);
+  assert.equal(value.dailyRecords.length, 1);
+
+  // 日次記録を持たない v1 のバックアップは、空で補って受け入れる
+  const v1 = { schemaVersion: 1, exportedAt: value.exportedAt, appVersion: '0.4.0', sessions: [], settings };
+  assert.deepEqual(validateBackup(v1).dailyRecords, []);
+
+  assert.throws(() => validateBackup({ ...value, schemaVersion: 3 }), /対応していません/);
 });

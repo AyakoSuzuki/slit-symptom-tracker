@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deriveMetrics, deriveOutcome, doseTimerPhase, formatJapaneseMinutes,
-  isValidTimerMinutes, reopenSession, selectedSeverityForDay
+  dailyScores, doseStatusForDay, isValidTimerMinutes, reopenSession, selectedSeverityForDay
 } from '../src/model.js';
 
 const settings = {
@@ -197,6 +197,46 @@ test('選択枠はその日に押した値にだけ付く', () => {
   // 0も値として扱う（未選択と区別する）
   const zero = addSymptomRecord(recorded, 0, at(9));
   assert.equal(selectedSeverityForDay(zero, day), 0);
+});
+
+test('日次スコアは6項目そろった日だけ算出する', () => {
+  const full = {
+    sneezing: 1, rhinorrhoea: 2, congestion: 0, nasalItch: 1,
+    ocularItch: 0, wateryEyes: 2, medicationClass: 1
+  };
+  const scores = dailyScores(full);
+  assert.equal(scores.dss, 1);      // (1+2+0+1+0+2) / 6
+  assert.equal(scores.dms, 1);
+  assert.equal(scores.csms, 2);     // dSS + dMS
+  assert.equal(scores.tnss, 4);     // 鼻4項目 1+2+0+1
+  assert.equal(scores.complete, true);
+
+  // 1項目でも欠けたら dSS と CSMS は出さない。鼻4項目が揃っていれば TNSS は出す
+  const partial = { ...full, wateryEyes: undefined };
+  assert.equal(dailyScores(partial).dss, undefined);
+  assert.equal(dailyScores(partial).csms, undefined);
+  assert.equal(dailyScores(partial).tnss, 4);
+  assert.equal(dailyScores(partial).complete, false);
+
+  // 対症薬が未入力なら CSMS は出さないが、症状の dSS は出す
+  const noMedication = { ...full, medicationClass: undefined };
+  assert.equal(dailyScores(noMedication).dss, 1);
+  assert.equal(dailyScores(noMedication).dms, undefined);
+  assert.equal(dailyScores(noMedication).csms, undefined);
+
+  assert.equal(dailyScores({}).dss, undefined);
+  assert.equal(dailyScores(undefined).tnss, undefined);
+});
+
+test('服用の有無はセッションを正本にする', () => {
+  const session = createSession(settings, undefined, at(0));
+  const day = session.localDate;
+  assert.equal(doseStatusForDay(undefined, [session], day), 'taken');
+  // セッションがある日は、記録側の「のまなかった」より優先する
+  assert.equal(doseStatusForDay({ slitStatus: 'missed' }, [session], day), 'taken');
+  assert.equal(doseStatusForDay({ slitStatus: 'missed' }, [], day), 'missed');
+  // 何も記録がない日を飲み忘れと同一視しない
+  assert.equal(doseStatusForDay(undefined, [], day), undefined);
 });
 
 test('明示的な分表記を使う', () => {

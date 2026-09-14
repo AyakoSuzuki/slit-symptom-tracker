@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'slit-symptom-tracker-app-';
-const CACHE_NAME = `${CACHE_PREFIX}0.4.8-20260914`;
+const CACHE_NAME = `${CACHE_PREFIX}0.4.9-20260914`;
 const APP_SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
   './src/app.js', './src/model.js', './src/db.js', './src/export.js', './src/charts.js',

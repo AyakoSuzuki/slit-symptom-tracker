@@ -1,4 +1,4 @@
-import { APP_VERSION, SCHEMA_VERSION, deriveMetrics, minutesBetween } from './model.js';
+import { APP_VERSION, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, deriveMetrics, minutesBetween } from './model.js';
 
 export const SUMMARY_COLUMNS = [
   'session_id', 'local_date', 'dose_time', 'timezone_offset_minutes', 'medication_name', 'dose',
@@ -51,19 +51,20 @@ export function timeSeriesCsv(sessions) {
   return csv([TIME_SERIES_COLUMNS, ...rows]);
 }
 
-export function backupJson(sessions, settings, exportedAt = new Date().toISOString()) {
+export function backupJson(sessions, settings, dailyRecords = [], exportedAt = new Date().toISOString()) {
   return JSON.stringify({
     schemaVersion: SCHEMA_VERSION,
     exportedAt,
     appVersion: APP_VERSION,
     sessions,
+    dailyRecords,
     settings
   }, null, 2);
 }
 
 export function validateBackup(value) {
   if (!value || typeof value !== 'object') throw new Error('バックアップ形式が正しくありません。');
-  if (value.schemaVersion !== SCHEMA_VERSION) throw new Error('このバックアップのバージョンには対応していません。');
+  if (!SUPPORTED_SCHEMA_VERSIONS.includes(value.schemaVersion)) throw new Error('このバックアップのバージョンには対応していません。');
   if (!Array.isArray(value.sessions) || !value.settings || typeof value.settings !== 'object') {
     throw new Error('バックアップに必要なデータがありません。');
   }
@@ -73,5 +74,10 @@ export function validateBackup(value) {
     }
     if (!['open', 'closed'].includes(session.lifecycle)) throw new Error('状態データが正しくありません。');
   }
-  return value;
+  const dailyRecords = Array.isArray(value.dailyRecords) ? value.dailyRecords : [];
+  for (const record of dailyRecords) {
+    if (!record?.localDate) throw new Error('日次記録が正しくありません。');
+  }
+  // 日次記録を持たない旧版のバックアップも、空で補って受け入れる
+  return { ...value, dailyRecords };
 }

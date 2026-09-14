@@ -1,5 +1,7 @@
-export const APP_VERSION = '0.4.8';
-export const SCHEMA_VERSION = 1;
+export const APP_VERSION = '0.4.9';
+export const SCHEMA_VERSION = 2;
+// 取り込みを受け付けるバックアップの版。v1 には日次記録が無いので空で補う。
+export const SUPPORTED_SCHEMA_VERSIONS = [1, 2];
 export const AUTO_CLOSE_MINUTES = 60;
 export const SEVERITIES = [0, 1, 2, 3, 4, 5];
 
@@ -212,6 +214,57 @@ export function shouldAutoClose(session, now = new Date()) {
 
 export function autoCloseSessions(sessions, now = new Date()) {
   return sessions.map((session) => shouldAutoClose(session, now) ? closeSession(session, now) : session);
+}
+
+// ---- 日次記録（鼻炎・結膜炎の症状コントロール）----
+// 局所反応（DoseSession）とは別物。こちらは有効性の評価に使う1日1件の記録で、
+// 判定基準が変わると1年分が比較できなくなるため、定義を動かさない。
+
+export const DAILY_NASAL_KEYS = ['sneezing', 'rhinorrhoea', 'congestion', 'nasalItch'];
+export const DAILY_OCULAR_KEYS = ['ocularItch', 'wateryEyes'];
+export const DAILY_SYMPTOM_KEYS = [...DAILY_NASAL_KEYS, ...DAILY_OCULAR_KEYS];
+export const DAILY_SEVERITIES = [0, 1, 2, 3];
+export const MEDICATION_CLASSES = [0, 1, 2, 3];
+
+export function createDailyRecord(day, now = new Date()) {
+  const timestamp = localIso(now);
+  return {
+    localDate: day,
+    entryTimestamp: timestamp,
+    isRetrospective: day !== localDate(now),
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function validDaily(value) {
+  return DAILY_SEVERITIES.includes(value);
+}
+
+// 6項目すべてが揃っている日だけ dSS を出す。部分入力の平均を混ぜると、
+// 他の日と比較できない値ができてしまう。
+export function dailyScores(record) {
+  const symptoms = DAILY_SYMPTOM_KEYS.map((key) => record?.[key]);
+  const nasal = DAILY_NASAL_KEYS.map((key) => record?.[key]);
+  const dss = symptoms.every(validDaily)
+    ? symptoms.reduce((sum, value) => sum + value, 0) / DAILY_SYMPTOM_KEYS.length
+    : undefined;
+  const dms = MEDICATION_CLASSES.includes(record?.medicationClass) ? record.medicationClass : undefined;
+  const tnss = nasal.every(validDaily) ? nasal.reduce((sum, value) => sum + value, 0) : undefined;
+  return {
+    dss,
+    dms,
+    csms: dss === undefined || dms === undefined ? undefined : dss + dms,
+    tnss,
+    complete: dss !== undefined && dms !== undefined
+  };
+}
+
+// 服用の有無は DoseSession を正本とする。セッションがある日は必ず taken。
+// 記録が何も無い日を「飲み忘れ」と同一視しない。
+export function doseStatusForDay(record, sessions, day) {
+  if (sessions.some((session) => session.localDate === day)) return 'taken';
+  return record?.slitStatus === 'missed' ? 'missed' : undefined;
 }
 
 export function median(values) {

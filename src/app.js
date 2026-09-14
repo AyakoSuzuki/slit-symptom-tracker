@@ -5,8 +5,8 @@ import {
   selectedSeverityForDay, shouldAutoClose, updateSymptomRecord, validateSettings
 } from './model.js';
 import {
-  deleteAllData, deleteSession, getMeta, getSessions, getSettings, putMeta, putSession,
-  putSettings, replaceAllData
+  deleteAllData, deleteSession, getDailyRecords, getMeta, getSessions, getSettings, putMeta,
+  putDailyRecord, putSession, putSettings, replaceAllData
 } from './db.js';
 import { backupJson, summaryCsv, timeSeriesCsv, validateBackup } from './export.js';
 import { comparisonChart, lineChart } from './charts.js';
@@ -19,6 +19,7 @@ const state = {
   period: 14,
   settings: { ...DEFAULT_SETTINGS },
   sessions: [],
+  dailyRecords: [],
   pendingWorry: undefined,
   worrySkipped: false,
   undo: null,
@@ -939,7 +940,7 @@ async function exportFile(name, content, type) {
 }
 
 async function exportBackup() {
-  const saved = await exportFile(`slit-backup-${localDateToday()}.json`, backupJson(state.sessions, state.settings), 'application/json');
+  const saved = await exportFile(`slit-backup-${localDateToday()}.json`, backupJson(state.sessions, state.settings, state.dailyRecords), 'application/json');
   if (!saved) return;
   const timestamp = new Date().toISOString();
   await putMeta('lastBackupAt', timestamp);
@@ -959,9 +960,10 @@ async function importConfirmed() {
   if (!state.importPreview) return;
   if (!confirm('現在の全データを置換します。実行前のバックアップを保存しましたか？')) return;
   const preview = state.importPreview;
-  if (await saveWithFeedback(() => replaceAllData(preview.sessions, { ...DEFAULT_SETTINGS, ...preview.settings }))) {
+  if (await saveWithFeedback(() => replaceAllData(preview.sessions, { ...DEFAULT_SETTINGS, ...preview.settings }, preview.dailyRecords))) {
     state.importPreview = null;
     state.settings = { ...DEFAULT_SETTINGS, ...preview.settings };
+    state.dailyRecords = await getDailyRecords();
     await refreshSessions();
     toast('バックアップを復元しました。');
     render();
@@ -1034,7 +1036,9 @@ function applyUpdate() {
 
 async function boot() {
   try {
-    [state.settings, state.lastBackupAt] = await Promise.all([getSettings(), getMeta('lastBackupAt')]);
+    [state.settings, state.lastBackupAt, state.dailyRecords] = await Promise.all([
+      getSettings(), getMeta('lastBackupAt'), getDailyRecords()
+    ]);
     await refreshSessions();
     await checkPersistence();
     render();

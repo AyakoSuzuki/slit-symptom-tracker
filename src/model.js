@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.5.1';
+export const APP_VERSION = '0.6.0';
 export const SCHEMA_VERSION = 2;
 // 取り込みを受け付けるバックアップの版。v1 には日次記録が無いので空で補う。
 export const SUPPORTED_SCHEMA_VERSIONS = [1, 2];
@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   askPreDoseWorry: true,
   showResolutionDurationInChildMode: false,
   dailyDiaryEnabled: true,
+  customSymptoms: [],
   doseTimerEnabled: false,
   holdMinutes: '',
   waitMinutes: '',
@@ -252,6 +253,27 @@ export function createDailyRecord(day, now = new Date()) {
 
 function validDaily(value) {
   return DAILY_SEVERITIES.includes(value);
+}
+
+// 利用者が足した記録項目。0〜3で記録するが、dSS / CSMS / TNSS には入れない。
+// これらは決まった6項目で計算する指標で、途中で中身を変えると前後の比較ができなくなるため。
+export const MAX_CUSTOM_SYMPTOMS = 6;
+
+export function customSymptomsOf(settings) {
+  const items = Array.isArray(settings?.customSymptoms) ? settings.customSymptoms : [];
+  return items.filter((item) => item && typeof item.id === 'string' && item.id
+    && typeof item.label === 'string' && item.label.trim());
+}
+
+// id は毎回新しく作る。連番にすると、外した項目の番号を次の項目が引き継ぎ、
+// 過去の記録の値が別の症状として読まれてしまうため。
+export function nextCustomSymptomId() {
+  return `c${newId().replace(/[^a-z0-9]/gi, '').slice(0, 10)}`;
+}
+
+export function customValue(record, id) {
+  const value = record?.custom?.[id];
+  return DAILY_SEVERITIES.includes(value) ? value : undefined;
 }
 
 // その日に使った薬は複数記録する。dMS はそのうち最上位のものを採る（元仕様 §3.2）。

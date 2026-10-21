@@ -1,6 +1,6 @@
 import {
-  APP_VERSION, DAILY_SYMPTOM_KEYS, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, dailyScores,
-  deriveMetrics, doseStatusForDay, medicationClassesOf, minutesBetween
+  APP_VERSION, DAILY_SYMPTOM_KEYS, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, customValue,
+  dailyScores, deriveMetrics, doseStatusForDay, medicationClassesOf, minutesBetween
 } from './model.js';
 
 export const SUMMARY_COLUMNS = [
@@ -61,8 +61,10 @@ export const DAILY_COLUMNS = [
   'medications_detail', 'note', 'entry_timestamp', 'is_retrospective'
 ];
 
-export function dailyCsv(records, sessions = []) {
+export function dailyCsv(records, sessions = [], customSymptoms = []) {
   const round = (value) => (value === undefined ? undefined : Number(value.toFixed(3)));
+  // 追加項目は標準の列の後ろに付ける。標準部分の並びを動かさないため
+  const columns = [...DAILY_COLUMNS, ...customSymptoms.map((item) => `custom_${item.label}`)];
   const rows = [...records]
     .sort((a, b) => (a.localDate < b.localDate ? -1 : 1))
     .map((record) => {
@@ -76,10 +78,11 @@ export function dailyCsv(records, sessions = []) {
         classes.length ? classes.join('|') : undefined,
         scores.dms, round(scores.csms),
         record.vasGlobal, record.medicationsDetail, record.note,
-        record.entryTimestamp, record.isRetrospective ? 1 : 0
+        record.entryTimestamp, record.isRetrospective ? 1 : 0,
+        ...customSymptoms.map((item) => customValue(record, item.id))
       ];
     });
-  return csv([DAILY_COLUMNS, ...rows]);
+  return csv([columns, ...rows]);
 }
 
 export function backupJson(sessions, settings, dailyRecords = [], exportedAt = new Date().toISOString()) {

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS, addSymptomRecord, autoCloseSessions, closeSession, confirmNoSymptoms,
   createSession, dashboardSummary, deriveMetrics, deriveOutcome, doseTimerPhase, formatJapaneseMinutes,
-  dailyScores, doseStatusForDay, isValidTimerMinutes, medicationClassesOf, recentDays, reopenSession,
+  customSymptomsOf, customValue, dailyScores, doseStatusForDay, isValidTimerMinutes,
+  medicationClassesOf, nextCustomSymptomId, recentDays, reopenSession,
   selectedSeverityForDay, shiftDay
 } from '../src/model.js';
 
@@ -243,6 +244,32 @@ test('その日に使った薬は複数記録し、dMSは最上位を採る', ()
   assert.deepEqual(medicationClassesOf({}), []);
   assert.equal(dailyScores(symptoms).dms, undefined);
   assert.equal(dailyScores(symptoms).csms, undefined);
+});
+
+test('追加した項目はスコアに入れず、0〜3で記録する', () => {
+  const withCustom = { ...settings, customSymptoms: [{ id: 'c1', label: '咳' }, { id: '', label: 'だめ' }] };
+  assert.deepEqual(customSymptomsOf(withCustom).map((item) => item.label), ['咳']);
+  assert.deepEqual(customSymptomsOf({}), []);
+
+  // id は使い回さない（外した項目の値を次の項目が引き継がないように）
+  const first = nextCustomSymptomId();
+  const second = nextCustomSymptomId();
+  assert.notEqual(first, second);
+  assert.match(first, /^c/);
+
+  const record = {
+    sneezing: 1, rhinorrhoea: 2, congestion: 0, nasalItch: 1, ocularItch: 0, wateryEyes: 2,
+    medicationClasses: [1], custom: { c1: 3 }
+  };
+  assert.equal(customValue(record, 'c1'), 3);
+  assert.equal(customValue(record, 'c9'), undefined);
+  assert.equal(customValue({}, 'c1'), undefined);
+
+  // 追加項目が3でも、スコアは決まった6項目のまま変わらない
+  const scores = dailyScores(record);
+  assert.equal(scores.dss, 1);
+  assert.equal(scores.csms, 2);
+  assert.equal(scores.tnss, 4);
 });
 
 test('服用の有無は「飲んだ」も記録できる', () => {

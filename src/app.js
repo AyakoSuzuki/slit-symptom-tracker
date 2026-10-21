@@ -3,8 +3,9 @@ import {
   createSession, dashboardSummary, deleteSymptomRecord, deriveMetrics, formatJapaneseMinutes,
   doseTimerPhase, isValidTimerMinutes, localIso, minutesBetween, reopenSession,
   selectedSeverityForDay, shouldAutoClose, updateSymptomRecord, validateSettings,
-  DAILY_SEVERITIES, DAILY_SYMPTOM_KEYS, MEDICATION_CLASSES, createDailyRecord, dailyScores,
-  doseStatusForDay, medicationClassesOf, recentDays, shiftDay
+  DAILY_SEVERITIES, DAILY_SYMPTOM_KEYS, MAX_CUSTOM_SYMPTOMS, MEDICATION_CLASSES, createDailyRecord,
+  customSymptomsOf, customValue, dailyScores, doseStatusForDay, medicationClassesOf,
+  nextCustomSymptomId, recentDays, shiftDay
 } from './model.js';
 import {
   deleteAllData, deleteDailyRecord, deleteSession, getDailyRecords, getMeta, getSessions,
@@ -501,6 +502,7 @@ function renderDaily() {
   const values = draft || stored || {};
   const scores = dailyScores(values);
   const selectedClasses = medicationClassesOf(values);
+  const customItems = customSymptomsOf(state.settings);
   const session = state.sessions.find((item) => item.localDate === day);
   const days = recentDays(today, 14);
   const filled = days.filter((item) => state.dailyRecords.some((record) => record.localDate === item)).length;
@@ -537,6 +539,16 @@ function renderDaily() {
               aria-label="${esc(dailySymptomLabels[key])} ${value} ${esc(dailyCriteria[value][1])}"><span>${value}</span></label>`).join('')}
           </div></div>`).join('')}
       </div>
+
+      ${customItems.length ? `<h3 class="daily-subhead">そのほかの症状</h3>
+      <p class="privacy">追加した項目です。スコア（dSS・CSMS）には入りません。</p>
+      <div class="daily-grid">${customItems.map((item) => `
+        <div class="daily-row"><span class="daily-label" id="daily-label-${esc(item.id)}">${esc(item.label)}</span>
+          <div class="daily-choices" role="group" aria-labelledby="daily-label-${esc(item.id)}">${DAILY_SEVERITIES.map((value) => `
+            <label class="daily-choice"><input type="radio" name="custom_${esc(item.id)}" value="${value}" ${customValue(values, item.id) === value ? 'checked' : ''}
+              aria-label="${esc(item.label)} ${value} ${esc(dailyCriteria[value][1])}"><span>${value}</span></label>`).join('')}
+          </div></div>`).join('')}
+      </div>` : ''}
 
       <fieldset class="field full"><legend>その日に使った薬（あてはまるものすべて）</legend>
         <div class="daily-medication">${MEDICATION_CLASSES.map((value) => `
@@ -585,6 +597,12 @@ function copyPreviousDay() {
   }
   const classes = medicationClassesOf(previous);
   if (classes.length) values.medicationClasses = classes;
+  const custom = {};
+  for (const item of customSymptomsOf(state.settings)) {
+    const value = customValue(previous, item.id);
+    if (value !== undefined) custom[item.id] = value;
+  }
+  if (Object.keys(custom).length) values.custom = custom;
   state.dailyDraft = { day, values };
   render();
   toast('前日の値を入れました。確認して保存してください。');
@@ -599,6 +617,13 @@ async function saveDaily(form) {
     const raw = data.get(key);
     record[key] = raw === null || raw === '' ? undefined : Number(raw);
   }
+  // 設定から外した項目の値も消さずに残す（バックアップから失わないため）
+  const custom = { ...(existing?.custom || {}) };
+  for (const item of customSymptomsOf(state.settings)) {
+    const raw = data.get(`custom_${item.id}`);
+    if (raw !== null && raw !== '') custom[item.id] = Number(raw);
+  }
+  record.custom = Object.keys(custom).length ? custom : undefined;
   const classes = data.getAll('medicationClasses').map(Number).filter((value) => MEDICATION_CLASSES.includes(value));
   record.medicationClasses = classes.length ? [...classes].sort((a, b) => a - b) : undefined;
   // 旧形式（1つだけを medicationClass に持つ記録）は、保存のたびに新形式へ寄せる
@@ -636,7 +661,8 @@ function renderSettings() {
       <label class="field"><span>用量・強度</span><input name="medicationDose" value="${esc(s.medicationDose)}" required></label>
       <label class="field full"><span>記録する症状（ひらがな）</span><input name="symptomLabel" value="${esc(s.childSymptomLabel || s.parentSymptomLabel)}" required>
         <small class="helper">子ども画面の「いま ○○は どんなかんじ？」の○○に入る、短いことばを入力してください。保護者画面にも同じ名前を表示します。</small></label>
-      <label class="field"><span>新しいPIN（数字4〜8桁、空欄なら変更なし）</span><input name="parentPin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" autocomplete="new-password"></label>
+      <label class="field"><span>${s.parentPinHash ? '新しいPIN（数字4〜8桁、空欄なら変更なし）' : 'PIN（数字4〜8桁、任意）'}</span><input name="parentPin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" autocomplete="new-password"></label>
+      ${s.parentPinHash ? '<label class="check field full"><input type="checkbox" name="clearParentPin"><span>PINを解除する（次から入力なしで保護者画面を開けます）</span></label>' : ''}
       <label class="field"><span>緊急連絡先のラベル（任意）</span><input name="emergencyContactLabel" value="${esc(s.emergencyContactLabel)}"></label>
       <label class="field"><span>緊急連絡先の値（任意）</span><input name="emergencyContactValue" value="${esc(s.emergencyContactValue)}"></label>
       <label class="check field full"><input type="checkbox" name="childModeEnabled" ${s.childModeEnabled?'checked':''}><span>子ども画面を使用する</span></label>
@@ -652,7 +678,57 @@ function renderSettings() {
         <small class="helper">処方医の指示や薬の説明書に書かれた時間を入力してください。アプリは入力された時間を計って表示するだけで、服用方法を決めるものではありません。アプリを閉じている間は知らせられません。</small>
       </fieldset>
     </div><p class="privacy">設定変更後も、過去セッションに保存された薬剤名・用量・症状表示名は変わりません。</p>
-    <button class="primary small" type="submit">設定を保存</button></form></section>`;
+    <button class="primary small" type="submit">設定を保存</button></form></section>
+    ${s.setupComplete && s.dailyDiaryEnabled ? renderCustomSymptoms() : ''}`;
+}
+
+function renderCustomSymptoms() {
+  const items = customSymptomsOf(state.settings);
+  return `<section class="card"><h2 class="panel-title">記録する症状を増やす</h2>
+    <p class="privacy">「日々の記録」に項目を足せます（0〜3で記録）。足した項目は dSS や CSMS などのスコアには入りません。
+      スコアは決まった6項目で計算するため、途中で中身を変えると、それ以前の記録と比較できなくなるからです。足した項目もCSVには書き出します。</p>
+    ${items.length ? `<ul class="custom-list">${items.map((item) => `<li><span>${esc(item.label)}</span>
+      <button class="secondary danger" type="button" data-action="remove-custom-symptom" data-id="${esc(item.id)}">外す</button></li>`).join('')}</ul>`
+      : '<p>まだ追加していません。</p>'}
+    ${items.length < MAX_CUSTOM_SYMPTOMS
+      ? `<form data-form="custom-symptom" class="custom-add">
+          <label class="field"><span>症状の名前（例: 咳）</span><input name="label" maxlength="12" required></label>
+          <div><button class="secondary" type="submit">追加</button></div>
+        </form>`
+      : `<p class="privacy">追加できるのは${MAX_CUSTOM_SYMPTOMS}項目までです。</p>`}
+  </section>`;
+}
+
+async function addCustomSymptom(form) {
+  const label = String(new FormData(form).get('label') || '').trim();
+  const current = customSymptomsOf(state.settings);
+  if (!label) { toast('症状の名前を入力してください。'); return; }
+  if (current.length >= MAX_CUSTOM_SYMPTOMS) { toast(`追加できるのは${MAX_CUSTOM_SYMPTOMS}項目までです。`); return; }
+  if (current.some((item) => item.label === label)) { toast('同じ名前の項目があります。'); return; }
+  const settings = {
+    ...state.settings,
+    customSymptoms: [...current, { id: nextCustomSymptomId(state.settings), label }]
+  };
+  if (await saveWithFeedback(() => putSettings(settings))) {
+    state.settings = settings;
+    toast(`「${label}」を追加しました。`);
+    render();
+  }
+}
+
+async function removeCustomSymptom(id) {
+  const item = customSymptomsOf(state.settings).find((entry) => entry.id === id);
+  if (!item) return;
+  if (!confirm(`「${item.label}」を記録項目から外しますか？\n\nこれまでに入力した値はバックアップには残りますが、日々の記録の画面とCSVには出なくなります。`)) return;
+  const settings = {
+    ...state.settings,
+    customSymptoms: customSymptomsOf(state.settings).filter((entry) => entry.id !== id)
+  };
+  if (await saveWithFeedback(() => putSettings(settings))) {
+    state.settings = settings;
+    toast(`「${item.label}」を外しました。`);
+    render();
+  }
 }
 
 function renderData() {
@@ -844,7 +920,8 @@ app.addEventListener('click', async (event) => {
   if (action === 'delete-record') { await removeRecord(button.dataset.sessionId, button.dataset.recordId); return; }
   if (action === 'export-summary') { await exportFile('slit-summary.csv', summaryCsv(state.sessions), 'text/csv;charset=utf-8'); return; }
   if (action === 'export-series') { await exportFile('slit-time-series.csv', timeSeriesCsv(state.sessions), 'text/csv;charset=utf-8'); return; }
-  if (action === 'export-daily') { await exportFile('slit-daily.csv', dailyCsv(state.dailyRecords, state.sessions), 'text/csv;charset=utf-8'); return; }
+  if (action === 'export-daily') { await exportFile('slit-daily.csv', dailyCsv(state.dailyRecords, state.sessions, customSymptomsOf(state.settings)), 'text/csv;charset=utf-8'); return; }
+  if (action === 'remove-custom-symptom') { await removeCustomSymptom(button.dataset.id); return; }
   if (action === 'export-backup') { await exportBackup(); return; }
   if (action === 'confirm-import') { await importConfirmed(); return; }
   if (action === 'request-persist') { await requestPersistence(); return; }
@@ -902,6 +979,7 @@ app.addEventListener('submit', async (event) => {
   if (kind === 'record-edit') await saveRecord(form);
   if (kind === 'session-edit') await saveSessionInfo(form);
   if (kind === 'daily') await saveDaily(form);
+  if (kind === 'custom-symptom') await addCustomSymptom(form);
   if (kind === 'delete-all') await removeAll(form);
 });
 
@@ -1033,7 +1111,8 @@ async function saveSettings(form) {
     emergencyContactLabel: String(data.get('emergencyContactLabel') || '').trim(),
     emergencyContactValue: String(data.get('emergencyContactValue') || '').trim(),
     setupComplete: true,
-    ...(pin ? { parentPinHash: await hashPin(pin) } : {})
+    // 解除が選ばれていれば、新しいPINの入力より優先して空にする
+    ...(data.has('clearParentPin') ? { parentPinHash: '' } : (pin ? { parentPinHash: await hashPin(pin) } : {}))
   };
   if (!validateSettings(settings)) { toast('必須項目を入力してください。'); return; }
   if (await saveWithFeedback(() => putSettings(settings))) {

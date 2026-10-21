@@ -81,6 +81,29 @@ test('日次CSVの列名と値', () => {
   assert.equal(partial[DAILY_COLUMNS.indexOf('dms')], '0');
 });
 
+test('日次CSVは追加項目を末尾の列に出す', () => {
+  const day = '2026-10-21';
+  const custom = [{ id: 'c1', label: '咳' }];
+  const records = [{
+    localDate: day, sneezing: 1, rhinorrhoea: 1, congestion: 1, nasalItch: 1, ocularItch: 1,
+    wateryEyes: 1, medicationClasses: [0], custom: { c1: 2 }
+  }];
+  const lines = dailyCsv(records, [], custom).split('\r\n');
+  const columns = lines[0].replace('﻿', '').split(',');
+
+  // 標準の列の並びは変えず、追加項目は末尾に付く
+  assert.deepEqual(columns.slice(0, DAILY_COLUMNS.length), DAILY_COLUMNS);
+  assert.equal(columns.at(-1), 'custom_咳');
+  assert.equal(lines[1].split(',').at(-1), '2');
+
+  // 追加項目は dss を動かさない
+  assert.equal(lines[1].split(',')[DAILY_COLUMNS.indexOf('dss')], '1');
+
+  // 設定に無ければ列も値も出ない
+  const without = dailyCsv(records, [], []).split('\r\n');
+  assert.equal(without[0].replace('﻿', '').split(',').length, DAILY_COLUMNS.length);
+});
+
 test('backupを往復し、旧版を受け入れて未知versionを拒否する', () => {
   const json = backupJson([], settings, [{ localDate: '2026-08-19', sneezing: 1 }], '2026-08-19T00:00:00.000Z');
   const value = validateBackup(JSON.parse(json));
